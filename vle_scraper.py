@@ -43,15 +43,18 @@ COURSE_PLAN_KEYWORDS = re.compile(
 # ── Telegram ──────────────────────────────────────────────────────────────────
 
 def tg(msg):
-    try:
-        requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "HTML",
-                  "disable_web_page_preview": True},
-            timeout=10
-        )
-    except Exception as e:
-        print(f"Telegram error: {e}")
+    limit = 4000
+    chunks = [msg[i:i+limit] for i in range(0, len(msg), limit)]
+    for chunk in chunks:
+        try:
+            requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                json={"chat_id": TELEGRAM_CHAT_ID, "text": chunk, "parse_mode": "HTML",
+                      "disable_web_page_preview": True},
+                timeout=10
+            )
+        except Exception as e:
+            print(f"Telegram error: {e}")
 
 
 # ── Database ──────────────────────────────────────────────────────────────────
