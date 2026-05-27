@@ -1,0 +1,6 @@
+playwright
+requests
+flask
+pdfminer.six
+python-docx
+paramiko

@@ -1,0 +1,9 @@
+config.py
+storageState.json
+*.db
+*.db-journal
+__pycache__/
+*.pyc
+.env
+*.log
+STUDENT_BOT_PROJECT.md
