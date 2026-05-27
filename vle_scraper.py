@@ -27,8 +27,8 @@ COURSES = {
 }
 
 ASSIGNMENT_KEYWORDS = re.compile(
-    r'assignment|project|quiz|report|submission|submit|lab|task|exercise|test|exam|proposal'
-    r'|presentation|practical|coursework|portfolio|case\s+study',
+    r'\b(?:assignment|project|quiz|quizzes|report|submission|submit|lab|task|exercise|test|exam|proposal'
+    r'|presentation|practical|coursework|portfolio|case\s+study)s?\b',
     re.IGNORECASE
 )
 
@@ -95,7 +95,7 @@ def _is_stale_date(due_str):
 
 
 def add_if_new(conn, task, course, due, source='vle'):
-    """Returns True if added, False if duplicate."""
+    """Returns True if added/updated, False if duplicate with no changes."""
     task = _clean_task_name(task.strip())
     if _is_stale_date(due):
         return False
@@ -104,10 +104,25 @@ def add_if_new(conn, task, course, due, source='vle'):
     # Normalize for dedup: ignore [PDF/Resource] prefix and whitespace
     norm = re.sub(r'^\[PDF/Resource\]\s*', '', task, flags=re.IGNORECASE).strip().lower()
     exists = conn.execute(
-        "SELECT id FROM deadlines WHERE LOWER(TRIM(REPLACE(task,'[PDF/Resource] ',''))) = ?",
+        "SELECT id, due FROM deadlines WHERE LOWER(TRIM(REPLACE(task,'[PDF/Resource] ',''))) = ?",
         (norm,)
     ).fetchone()
     if exists:
+        row_id, existing_due = exists
+        existing_due_upper = (existing_due or '').upper()
+        new_due_upper = (due or '').upper()
+        
+        is_existing_generic = any(x in existing_due_upper for x in ('VLE', 'CLP', 'SEE', 'TBD', 'N/A')) or not existing_due
+        is_new_generic = any(x in new_due_upper for x in ('VLE', 'CLP', 'SEE', 'TBD', 'N/A')) or not due
+        
+        if is_existing_generic and not is_new_generic:
+            conn.execute(
+                "UPDATE deadlines SET due = ?, source = ? WHERE id = ?",
+                (due, source, row_id)
+            )
+            conn.commit()
+            print(f"    * updated due date for '{task}' from '{existing_due}' to '{due}'")
+            return True
         return False
     conn.execute(
         "INSERT INTO deadlines (task, course, due, source) VALUES (?,?,?,?)",
@@ -349,8 +364,6 @@ def scrape_assignment_page(page, url):
         for sel in [
             '.submissionstatusbutton',
             '[data-region="assign-due-date"]',
-            '.box.generalbox td:nth-child(2)',
-            'td.cell.c1',
         ]:
             els = page.query_selector_all(sel)
             for el in els:
@@ -366,6 +379,18 @@ def scrape_assignment_page(page, url):
                 val = row.inner_text().strip()
                 if re.search(r'\d{1,2}\s+\w+\s+\d{4}', val):
                     return val[:80]
+
+        # Fallback: scan the entire body text line-by-line for a due date statement
+        body_text = page.locator("body").inner_text()
+        for line in body_text.splitlines():
+            line_clean = line.strip()
+            if not line_clean:
+                continue
+            line_lower = line_clean.lower()
+            if 'due' in line_lower:
+                # Look for date pattern in the same line (e.g. "Due: Sunday, 14 June 2026, 11:59 PM")
+                if re.search(r'\d{1,2}\s+[A-Za-z]{3,10}\s+\d{4}|\d{1,2}/\d{1,2}/\d{2,4}', line_clean):
+                    return line_clean[:80]
     except Exception as e:
         print(f"    assignment page error: {e}")
     return "See VLE"
@@ -514,6 +539,9 @@ def scrape_course(page, course_url, course_code, conn):
 
             # CLP documents: extract deadline lines as separate tasks
             if is_clp:
+                if course_code == 'WEB20202':
+                    # Skip PE CLP entirely to avoid parsing slide-deck templates and garbage lines as tasks
+                    continue
                 if href:
                     try:
                         clp_tasks = extract_clp_deadlines(page, href, course_code)
@@ -541,13 +569,16 @@ def scrape_course(page, course_url, course_code, conn):
             print(f"    ! process error: {e}")
 
     # ── Fallback: if nothing was added, scan ALL resources for project briefs ──
-    if not added:
+    if not added and course_code != 'WEB20202':
         print(f"    [fallback] 0 tasks found — reading all PDFs/pages for project info...")
         for task_name, href, modtype, _ in activities:
             if modtype not in ('resource', 'page', 'url') or not href:
                 continue
-            # Skip things that are clearly not assignment documents
-            if re.match(r'^(announcement|notice|welcome|news|forum)\b', task_name, re.IGNORECASE):
+            # Skip things that are clearly not assignment documents (study/lecture materials)
+            if re.match(r'^(announcement|notice|welcome|news|forum)\b', task_name, re.IGNORECASE) or re.search(
+                r'lecture|slide|chapter|week|topic|template|sample|exercise|tutorial|note|reading|handout|material|reference|rubric|syllabus|coursework',
+                task_name, re.IGNORECASE
+            ):
                 continue
             try:
                 clp_tasks = extract_clp_deadlines(page, href, course_code)

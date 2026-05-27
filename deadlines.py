@@ -1,7 +1,40 @@
 import sqlite3
-from datetime import datetime
+import re
+from datetime import datetime, date
 
 DB = "/root/student-bot/deadlines.db"
+
+
+def _parse_due(due_str):
+    """Parse due date string for sorting. Unparseable -> pushed to end."""
+    if not due_str:
+        return date(9999, 12, 31)
+    s = due_str.strip()
+    
+    # Extract clean date pattern if present
+    m = re.search(r'(\d{1,2}\s+[A-Za-z]{3,9}\s+\d{2,4})', s)
+    if m:
+        s = m.group(1)
+    else:
+        m = re.search(r'(\d{1,2}/\d{1,2}/\d{2,4})', s)
+        if m:
+            s = m.group(1)
+        else:
+            m = re.search(r'(\d{4}-\d{2}-\d{2})', s)
+            if m:
+                s = m.group(1)
+                
+    for fmt in ('%d %b %Y', '%d %B %Y', '%d %b %y', '%d %B %y', '%d/%m/%y', '%d/%m/%Y', '%Y-%m-%d'):
+        try:
+            return datetime.strptime(s, fmt).date()
+        except ValueError:
+            pass
+            
+    su = due_str.upper()
+    if 'VLE' in su or 'CLP' in su or 'TBD' in su or 'N/A' in su or 'SEE' in su:
+        return date(9999, 12, 31)
+        
+    return date(9999, 12, 30)
 
 
 def init():
@@ -44,13 +77,14 @@ def get_all(include_done=False):
     conn = sqlite3.connect(DB)
     if include_done:
         rows = conn.execute(
-            "SELECT id, task, course, due, status FROM deadlines ORDER BY id"
+            "SELECT id, task, course, due, status FROM deadlines"
         ).fetchall()
     else:
         rows = conn.execute(
-            "SELECT id, task, course, due, status FROM deadlines WHERE status != 'Done' ORDER BY id"
+            "SELECT id, task, course, due, status FROM deadlines WHERE status != 'Done'"
         ).fetchall()
     conn.close()
+    rows.sort(key=lambda r: _parse_due(r[3]))
     return rows
 
 

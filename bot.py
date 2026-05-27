@@ -1,9 +1,11 @@
 import requests
 import time
+import threading
 from db import init as init_wa, save as save_wa, get_all as get_wa, mark_done as done_wa, delete_item as del_wa, clear_done as clear_wa
-from deadlines import init as init_dl, get_all as get_dl, mark_done as done_dl, mark_pending as undo_dl, delete as del_dl, clear_done as clear_dl
+from deadlines import init as init_dl, get_all as get_dl, mark_done as done_dl, mark_pending as undo_dl, delete as del_dl, clear_done as clear_dl, _parse_due
 from config import BOT_TOKEN, CHAT_ID
-from datetime import datetime
+from datetime import datetime, date
+from vle_login import login_state, start_login_thread
 
 BASE = f"https://api.telegram.org/bot{BOT_TOKEN}"
 last_update_id = 0
@@ -16,6 +18,24 @@ def send(text):
         "parse_mode": "HTML",
         "disable_web_page_preview": True
     })
+
+
+def _urgency(due_str):
+    d = _parse_due(due_str)
+    today = date.today()
+    if d >= date(9999, 12, 30):
+        return "📌"
+    days = (d - today).days
+    if days < 0:
+        return "🔴 OVERDUE"
+    elif days == 0:
+        return "🔴 TODAY"
+    elif days <= 2:
+        return f"🔴 {days}d"
+    elif days <= 7:
+        return f"🟡 {days}d"
+    else:
+        return f"🟢 {days}d"
 
 
 def parse_automate_message(text):
@@ -41,7 +61,10 @@ def handle(update):
     if chat != str(CHAT_ID):
         return
 
-    # ── Automate-forwarded WhatsApp message ──────────────────
+    # Normalize click-to-check command links, e.g. /check_213_261 -> /check 213 261
+    if text.startswith("/check_"):
+        text = "/check " + text[7:].replace("_", " ")
+
     if text.startswith("📌"):
         group, sender, message = parse_automate_message(text)
         if message:
@@ -55,10 +78,17 @@ def handle(update):
         if not rows:
             send("✅ <b>No pending tasks!</b>")
             return
-        lines = [f"📋 <b>Pending Tasks ({len(rows)})</b>\n"]
-        for id_, task, course, due, status in rows:
-            lines.append(f"<b>{id_}.</b> {task}\n    📚 {course}  📅 {due}\n")
-        lines.append("<i>/check ID — mark done  |  /todel ID — remove</i>")
+        
+        # Deduplicate tasks locally in command view too!
+        from gemini_dashboard import deduplicate_tasks
+        rows_deduped = deduplicate_tasks(rows)
+        
+        lines = [f"📋 <b>Pending Tasks ({len(rows_deduped)})</b>\n"]
+        for id_str, course, task, due in rows_deduped:
+            urg = _urgency(due)
+            cmd_str = id_str.replace(",", "_")
+            lines.append(f"• [{course}] {task} — {due} {urg} /check_{cmd_str}")
+        lines.append("\n<i>✅ Tap /check_ID next to a task to mark it done.</i>")
         send("\n".join(lines))
 
     elif text == "/alltasks":
@@ -68,7 +98,7 @@ def handle(update):
             return
         lines = [f"📋 <b>All Tasks ({len(rows)})</b>\n"]
         for id_, task, course, due, status in rows:
-            icon = "✅" if status == "Done" else "⏳"
+            icon = "✅" if status == "Done" else _urgency(due)
             lines.append(f"{icon} <b>{id_}.</b> {task}  [{course}]  {due}")
         send("\n".join(lines))
 
@@ -77,7 +107,11 @@ def handle(update):
         if len(parts) < 2:
             send("Usage: <code>/check 3</code> or <code>/check 3 5</code>")
             return
-        ids = [int(p) for p in parts[1:] if p.isdigit()]
+        # Support comma-separated or space-separated IDs
+        raw_ids = []
+        for p in parts[1:]:
+            raw_ids.extend(p.replace(',', ' ').split())
+        ids = [int(p) for p in raw_ids if p.isdigit()]
         for i in ids:
             done_dl(i)
         send(f"✅ Marked done: {ids}\n\n<i>Use /tasks to see remaining</i>")
@@ -109,13 +143,59 @@ def handle(update):
     # ── WHATSAPP MESSAGES ─────────────────────────────────────
 
     elif text in ("/list", "/l"):
+        import re as _re
         items = get_wa(include_done=False)
         if not items:
-            send("✅ <b>No pending WhatsApp messages.</b>")
+            send("✅ <b>No new alerts.</b>")
             return
-        lines = [f"💬 <b>WhatsApp Pending ({len(items)})</b>\n"]
-        for id_, group, sender, message, received, done in items:
-            lines.append(f"<b>[{id_}]</b> <b>{group}</b>\n{message[:120]}\n<i>{received}</i>\n")
+
+        def _is_academic_msg(t):
+            t = t.lower()
+            strong = ["deadline","due date","due:","submit by","kena hantar","kena submit",
+                      "no class","cancel class","class cancel","replace class","replacement class",
+                      "reschedule","postpone","tangguh kelas","quiz","final exam","mid term",
+                      "midterm","project brief","project due","assignment due"]
+            if any(s in t for s in strong): return True
+            has_sub = any(w in t for w in ["submit","hantar","serah","submission"])
+            has_asgn = "assignment" in t
+            has_date = bool(_re.search(r'\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday|isnin|selasa|rabu|khamis|jumaat|sabtu|ahad|\d+\s*(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|june|july)|week\s*\d+|minggu\s*\d+|esok|tomorrow|malam ni|tonight|hari ni)\b', t))
+            has_due = bool(_re.search(r'\b(due|before |sebelum )\b', t))
+            return (has_sub or has_asgn) and (has_date or has_due)
+
+        def _is_ecert_msg(t):
+            t = t.lower()
+            has_cert = any(w in t for w in ["e-cert","ecert","certificate","sijil"])
+            has_free = any(w in t for w in ["free","percuma"])
+            has_event = any(w in t for w in ["webinar","workshop","competition","hackathon","seminar"])
+            return (has_cert and (has_free or has_event)) or (has_free and any(w in t for w in ["competition","hackathon","contest"]))
+
+        academic = [(id_, g, msg, recv) for id_, g, s, msg, recv, d in items if _is_academic_msg(msg)]
+        ecerts   = [(id_, g, msg, recv) for id_, g, s, msg, recv, d in items if not _is_academic_msg(msg) and _is_ecert_msg(msg)]
+
+        lines = []
+        if academic:
+            lines.append(f"📚 <b>Academic Alerts ({len(academic)})</b>")
+            char_count = 30
+            for id_, group, msg, recv in academic:
+                block = f"\n<b>[{id_}]</b> <b>{group}</b>\n{msg[:150]}\n"
+                if char_count + len(block) > 3500:
+                    lines.append(f"<i>...+{len(academic)} more — use /listgroup to view all</i>")
+                    break
+                lines.append(block)
+                char_count += len(block)
+
+        if ecerts:
+            lines.append(f"\n🏆 <b>Free E-cert / Events ({len(ecerts)})</b>")
+            for id_, group, msg, recv in ecerts[:5]:
+                lines.append(f"\n<b>[{id_}]</b> <b>{group}</b>\n{msg[:150]}\n")
+            if len(ecerts) > 5:
+                lines.append(f"<i>...+{len(ecerts)-5} more</i>")
+
+        if not academic and not ecerts:
+            send("✅ <b>No academic alerts or e-cert opportunities.</b>")
+            return
+
+        lines.append("\n<i>/done ID — dismiss  |  /listgroup NAME — full group msgs</i>")
         send("\n".join(lines))
 
     elif text == "/all":
@@ -123,10 +203,19 @@ def handle(update):
         if not items:
             send("Database is empty.")
             return
-        lines = [f"💬 <b>All WhatsApp Messages ({len(items)})</b>\n"]
+        pending = sum(1 for r in items if r[5] == 0)
+        done_count = len(items) - pending
+        grouped = {}
         for id_, group, sender, message, received, done in items:
-            icon = "✅" if done else "⏳"
-            lines.append(f"{icon} <b>[{id_}]</b> <b>{group}</b>: {message[:80]}")
+            grouped.setdefault(group, {'pending': 0, 'done': 0})
+            if done:
+                grouped[group]['done'] += 1
+            else:
+                grouped[group]['pending'] += 1
+        lines = [f"💬 <b>All WA Messages: {len(items)} total ({pending} pending, {done_count} done)</b>\n"]
+        for group, counts in grouped.items():
+            lines.append(f"  <b>{group}</b>: {counts['pending']} pending, {counts['done']} done")
+        lines.append("\n<i>/list — show pending  |  /clear — remove done</i>")
         send("\n".join(lines))
 
     elif text.startswith("/done"):
@@ -168,7 +257,6 @@ def handle(update):
     elif text == "/qr":
         try:
             import requests as req
-            # Check session status first
             sr = req.get("http://localhost:2785/api/sessions/default",
                          headers={"X-Api-Key": "dev-admin-key"}, timeout=5)
             st = sr.json().get("status", "unknown") if sr.ok else "unknown"
@@ -177,7 +265,7 @@ def handle(update):
                 send(f"✅ <b>WhatsApp already connected!</b>\n📱 {me.get('pushName','')}")
                 return
             r = req.get("http://localhost:2785/api/default/auth/qr?format=image",
-                        headers={"X-Api-Key": "dev-admin-key"}, timeout=8)
+                         headers={"X-Api-Key": "dev-admin-key"}, timeout=8)
             if r.status_code == 200:
                 requests.post(f"{BASE}/sendPhoto", data={
                     "chat_id": CHAT_ID,
@@ -186,8 +274,7 @@ def handle(update):
                         "WhatsApp → Settings → Linked Devices → Link a Device\n"
                         "<i>QR expires in ~20s</i>\n\n"
                         "📲 <b>Option 2 — Pairing code (easier):</b>\n"
-                        "Send: <code>/link 601XXXXXXXXX</code>\n"
-                        "You'll get an 8-digit code to type instead"
+                        "Send: <code>/link 601XXXXXXXXX</code>"
                     ),
                     "parse_mode": "HTML"
                 }, files={"photo": ("qr.png", r.content, "image/png")})
@@ -199,7 +286,7 @@ def handle(update):
     elif text.startswith("/link"):
         parts = text.split()
         if len(parts) < 2:
-            send("Usage: <code>/link 601XXXXXXXXX</code>\n\nThen open WhatsApp → Settings → Linked Devices → Link a Device → <b>Link with phone number</b> and enter the code.")
+            send("Usage: <code>/link 601XXXXXXXXX</code>")
             return
         phone = parts[1].strip().replace("+", "").replace("-", "").replace(" ", "")
         try:
@@ -209,16 +296,97 @@ def handle(update):
                          headers={"X-Api-Key": "dev-admin-key"}, timeout=20)
             if r.status_code == 200:
                 code = r.json().get("code", "")
-                send(
-                    f"📲 <b>Pairing Code:</b>\n\n"
-                    f"<code>{code}</code>\n\n"
-                    f"Open WhatsApp → Settings → Linked Devices → Link a Device → "
-                    f"<b>Link with phone number</b> → enter the code above."
-                )
+                send(f"📲 <b>Pairing Code:</b>\n\n<code>{code}</code>\n\nWhatsApp → Settings → Linked Devices → Link a Device → <b>Link with phone number</b>")
             else:
-                send(f"❌ Code request failed ({r.status_code}): {r.text[:100]}\nMake sure the number is correct (e.g. 60123456789)")
+                send(f"❌ Code request failed ({r.status_code}): {r.text[:100]}")
         except Exception as e:
             send(f"❌ Link error: {e}")
+
+    elif text.startswith("/listgroup"):
+        parts = text.split(None, 1)
+        if len(parts) < 2:
+            send("Usage: <code>/listgroup GROUPNAME</code>\nExample: <code>/listgroup OOSAD</code>")
+        else:
+            query = parts[1].strip().lower()
+            items = get_wa(include_done=False)
+            matched = [r for r in items if query in r[1].lower()]
+            if not matched:
+                send(f"No pending messages matching: {query}")
+            else:
+                lines = [f"💬 <b>{matched[0][1]} ({len(matched)} msgs)</b>\n"]
+                char_count = len(lines[0])
+                for id_, group, sender, message, received, done in matched:
+                    block = f"<b>[{id_}]</b> {sender}\n{message[:200]}\n<i>{received[:10]}</i>\n\n"
+                    if char_count + len(block) > 3800:
+                        lines.append(f"<i>...{len(matched)} total, showing first {len(lines)-1}</i>")
+                        break
+                    lines.append(block)
+                    char_count += len(block)
+                lines.append("<i>/done ID to mark read</i>")
+                send("\n".join(lines))
+
+    # ── VLE LOGIN & MFA ──────────────────────────────────────
+
+    elif text.startswith("/setup_vle"):
+        parts = text.split()
+        if len(parts) < 3:
+            send("Usage: <code>/setup_vle email password</code>")
+            return
+        email = parts[1].strip()
+        password = parts[2].strip()
+        
+        # Read config.py
+        try:
+            with open("/root/student-bot/config.py", "r") as f:
+                lines = f.readlines()
+        except FileNotFoundError:
+            with open("config.py", "r") as f:
+                lines = f.readlines()
+                
+        new_lines = []
+        for line in lines:
+            if not (line.strip().startswith("VLE_EMAIL") or line.strip().startswith("VLE_PASSWORD")):
+                new_lines.append(line)
+        new_lines.append(f"\nVLE_EMAIL = {repr(email)}\n")
+        new_lines.append(f"VLE_PASSWORD = {repr(password)}\n")
+        
+        # Write back
+        try:
+            with open("/root/student-bot/config.py", "w") as f:
+                f.writelines(new_lines)
+        except Exception:
+            with open("config.py", "w") as f:
+                f.writelines(new_lines)
+                
+        send("🔒 <b>UniKL credentials saved!</b> You can now run `/login` to refresh your VLE session.")
+
+    elif text == "/login":
+        success = start_login_thread()
+        if success:
+            pass # Thread handles initial notification
+
+    elif text.startswith("/code"):
+        parts = text.split()
+        if len(parts) < 2:
+            send("Usage: <code>/code 123456</code>")
+            return
+        code = parts[1].strip()
+        if login_state["status"] == "waiting_code":
+            login_state["code"] = code
+            send("🔑 <b>Code received!</b> Submitting verification code to Microsoft login...")
+        else:
+            send("⚠️ No login session is currently waiting for a code.")
+
+    # ── DASHBOARD & DIGEST ────────────────────────────────────
+
+    elif text in ("/dashboard", "/dash", "/summary"):
+        send("⏳ Building dashboard...")
+        try:
+            from gemini_dashboard import get_dashboard
+            result = get_dashboard()
+            send(result)
+        except Exception as e:
+            send(f"❌ Dashboard error: {e}")
 
     elif text in ("/scrape", "/vle"):
         send("🔄 <b>Scraping VLE now...</b> Results follow in ~10 min.")
@@ -246,33 +414,40 @@ def handle(update):
 
     elif text == "/help":
         send(
-            "<b>Student Bot Commands</b>\n\n"
-            "<b>Deadline Tasks:</b>\n"
-            "/tasks — pending task list\n"
-            "/alltasks — all tasks incl. done\n"
-            "/check 3 — mark task 3 done\n"
-            "/check 3 5 — mark multiple done\n"
-            "/undo 3 — unmark task 3\n"
-            "/todel 3 — delete task 3\n"
-            "/cleardone — remove completed tasks\n\n"
-            "<b>WhatsApp Messages:</b>\n"
-            "/list — pending WA messages\n"
-            "/all — all WA messages\n"
-            "/today — today's WA messages\n"
-            "/done 3 — mark WA msg done\n"
-            "/del 3 — delete WA msg\n"
-            "/clear — remove completed WA msgs\n\n"
-            "<b>VLE &amp; Scraping:</b>\n"
-            "/scrape — rescan VLE now (all courses)\n"
-            "/vle — same as /scrape\n\n"
-            "<b>WhatsApp linking:</b>\n"
-            "/qr — scan QR code to link WhatsApp\n"
-            "/link 601XXXXXXXXX — pairing code (no camera needed)\n\n"
-            "<b>Other:</b>\n"
-            "/digest — send morning digest now\n"
-            "/stats — show counts\n"
-            "/help — this message"
+            "🌟 <b>Student Bot — Core Commands</b> 🌟\n\n"
+            "📊 /summary — View your unified dashboard (VLE tasks + WA alerts)\n"
+            "✅ /check ID — Mark a VLE task as done (e.g. <code>/check 300</code>)\n"
+            "💬 /done ID — Dismiss a WhatsApp alert (e.g. <code>/done 521</code>)\n"
+            "🌐 /login — Log in & refresh VLE session (MFA on your phone)\n\n"
+            "💡 <i>Send /advanced to see all other commands (scrape, stats, etc.)</i>"
         )
+
+    elif text == "/advanced":
+        send(
+            "⚙️ <b>Advanced Management Commands</b> ⚙️\n\n"
+            "<b>Tasks & Alerts:</b>\n"
+            "/tasks — pending task list\n"
+            "/alltasks — all tasks including completed\n"
+            "/undo ID — unmark a task as done\n"
+            "/todel ID — delete a task from database\n"
+            "/cleardone — clear completed tasks\n\n"
+            "<b>WhatsApp Alerts:</b>\n"
+            "/list — pending WhatsApp alerts\n"
+            "/all — all WhatsApp alerts\n"
+            "/today — today's WhatsApp alerts\n"
+            "/del ID — delete a WhatsApp alert\n"
+            "/clear — clear completed WhatsApp alerts\n"
+            "/listgroup NAME — full group messages\n\n"
+            "<b>System & Integration:</b>\n"
+            "/scrape — rescan VLE immediately\n"
+            "/digest — trigger daily digest now\n"
+            "/stats — show counts\n"
+            "/setup_vle email password — save credentials on server\n"
+            "/code 123456 — enter OTP code for VLE login\n"
+            "/qr — scan QR for WhatsApp\n"
+            "/link PHONE — pair WhatsApp"
+        )
+
 
 
 def poll():
@@ -295,5 +470,9 @@ if __name__ == "__main__":
     init_dl()
     print("Student bot running. Send /help to get started.")
     while True:
-        poll()
-        time.sleep(2)
+        try:
+            poll()
+            time.sleep(2)
+        except KeyboardInterrupt:
+            print("Shutting down cleanly.")
+            break
