@@ -94,16 +94,3 @@ WhatsApp Groups ─┘
 5. Run `get_session.py` to capture VLE browser session → `storageState.json`
 6. Start WAHA Docker container for WhatsApp bridge
 7. Use PM2 to run `bot.py` and `webhook_receiver.py`
-
-## Courses Covered
-
-- IEB20603 — Database Systems
-- ISB16003 — Object-Oriented Programming
-- ISB16204 — Computer Organisation & Architecture
-- IGB20303 — Probability & Statistics
-- IEB20703 — OO Systems Analysis & Design
-- WEB20202 — Professional English (section L07)
-
----
-
-*Built for personal use — UniKL MIIT, Bachelor of IT (Software Engineering), Semester 2*

@@ -16,7 +16,15 @@ SESSION_FILE = "/root/student-bot/storageState.json"
 DEADLINES_DB = "/root/student-bot/deadlines.db"
 MESSAGES_DB  = "/root/student-bot/messages.db"
 
-# Courses are dynamically discovered on the VLE dashboard page
+# All 6 courses from timetable
+COURSES = {
+    "IEB20603": "DATABASE",
+    "ISB16003": "OOP",
+    "ISB16204": "COOS",
+    "IGB20303": "PROB STAT",
+    "IEB20703": "OOSAD",
+    "WEB20202": "PE",
+}
 
 ASSIGNMENT_KEYWORDS = re.compile(
     r'\b(?:assignment|project|quiz|quizzes|report|submission|submit|lab|task|exercise|test|exam|proposal'
@@ -321,21 +329,9 @@ def extract_clp_deadlines(page, resource_url, course_code):
     return tasks
 
 
-def parse_course_info(text, href):
-    m = re.search(r'\b([A-Z]{2,3}\d{4,5})\b', text)
-    if m:
-        code = m.group(1)
-        name = text.replace(code, '').replace('[]', '').replace('()', '').strip()
-        name = re.sub(r'^[\s\-\[\]\(\):]+|[\s\-\[\]\(\):]+$', '', name).strip()
-        if not name:
-            name = code
-        return code, name
-    m_id = re.search(r'id=(\d+)', href)
-    if m_id:
-        code = f"COURSE-{m_id.group(1)}"
-        name = text.strip() or code
-        return code, name
-    return None, None
+def extract_course_code(text):
+    m = re.search(r'\b([A-Z]{2,3}\d{5})\b', text)
+    return m.group(1) if m else None
 
 
 def clean_name(name):
@@ -400,9 +396,10 @@ def scrape_assignment_page(page, url):
     return "See VLE"
 
 
-def scrape_course(page, course_url, course_code, course_name, conn):
+def scrape_course(page, course_url, course_code, conn):
     """Visit a course page and scrape all assignments and resources."""
     added = []
+    course_name = COURSES.get(course_code, course_code)
     print(f"\n  [{course_name}] {course_url[:70]}")
 
     try:
@@ -502,6 +499,12 @@ def scrape_course(page, course_url, course_code, course_name, conn):
             ):
                 continue
 
+            # PE section filter: keep only L07 and generic (no section suffix) items
+            if course_code == 'WEB20202':
+                m = pe_section_re.search(task_name)
+                if m and m.group(0).upper() != 'L07':
+                    continue
+
             # Skip Moodle announcement forum posts (not actual tasks)
             if task_name.startswith('📢') or re.match(r'^Announcement[s]?[\s:–—]', task_name, re.IGNORECASE):
                 continue
@@ -536,6 +539,9 @@ def scrape_course(page, course_url, course_code, course_name, conn):
 
             # CLP documents: extract deadline lines as separate tasks
             if is_clp:
+                if course_code == 'WEB20202':
+                    # Skip PE CLP entirely to avoid parsing slide-deck templates and garbage lines as tasks
+                    continue
                 if href:
                     try:
                         clp_tasks = extract_clp_deadlines(page, href, course_code)
@@ -563,7 +569,7 @@ def scrape_course(page, course_url, course_code, course_name, conn):
             print(f"    ! process error: {e}")
 
     # ── Fallback: if nothing was added, scan ALL resources for project briefs ──
-    if not added:
+    if not added and course_code != 'WEB20202':
         print(f"    [fallback] 0 tasks found — reading all PDFs/pages for project info...")
         for task_name, href, modtype, _ in activities:
             if modtype not in ('resource', 'page', 'url') or not href:
@@ -591,7 +597,7 @@ def scrape_course(page, course_url, course_code, course_name, conn):
 def run():
     ts = datetime.now().strftime('%H:%M:%S')
     print(f"[{ts}] VLE Deep Scraper starting...")
-    tg("🔄 <b>VLE Deep Scraper</b>\nDiscovering and loading course pages...")
+    tg("🔄 <b>VLE Deep Scraper</b>\nLoading all 6 course pages...")
 
     if not os.path.exists(SESSION_FILE):
         tg("❌ storageState.json not found.")
@@ -622,39 +628,37 @@ def run():
             page.wait_for_load_state("networkidle", timeout=15000)
 
         # Discover course URLs from dashboard
-        course_map = {}  # code -> {"url": url, "name": name}
+        course_map = {}  # code -> url
         links = page.query_selector_all('a[href*="course/view.php"]')
         for link in links:
             href = link.get_attribute('href') or ''
             text = link.inner_text().strip()
-            if not href or not text or len(text) < 4:
-                continue
-            code, name = parse_course_info(text, href)
-            if code and code not in course_map:
-                course_map[code] = {"url": href, "name": name}
-                print(f"  Found course: {code} ({name}) → {href}")
+            code = extract_course_code(text) or extract_course_code(href)
+            if code and code in COURSES and code not in course_map:
+                course_map[code] = href
+                print(f"  Found course: {code} → {href}")
 
-        # If empty, try the "All courses" / enrolment page
-        if not course_map:
-            print("  No courses found on dashboard, trying courses page...")
+        # If any courses not found by link text, try the "All courses" / enrolment API
+        missing = [c for c in COURSES if c not in course_map]
+        if missing:
+            print(f"  Missing via links: {missing}, trying course search...")
             page.goto("https://vle.unikl.edu.my/my/courses.php", timeout=20000)
             page.wait_for_load_state("networkidle", timeout=10000)
             links2 = page.query_selector_all('a[href*="course/view.php"]')
             for link in links2:
                 href = link.get_attribute('href') or ''
-                text = link.inner_text().strip()
-                if not href or not text or len(text) < 4:
-                    continue
-                code, name = parse_course_info(text, href)
-                if code and code not in course_map:
-                    course_map[code] = {"url": href, "name": name}
-                    print(f"  Found course (courses page): {code} ({name}) → {href}")
+                text = (link.inner_text() + " " + href)
+                code = extract_course_code(text)
+                if code and code in COURSES and code not in course_map:
+                    course_map[code] = href
+                    print(f"  Found (courses page): {code} → {href}")
 
         print(f"\nCourses found: {list(course_map.keys())}")
+        print(f"Missing: {[c for c in COURSES if c not in course_map]}")
 
         # Deep-scrape each course
-        for code, info in course_map.items():
-            added = scrape_course(page, info["url"], code, info["name"], conn)
+        for code, url in course_map.items():
+            added = scrape_course(page, url, code, conn)
             all_added.extend(added)
 
         b.close()
