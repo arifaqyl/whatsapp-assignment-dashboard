@@ -9,9 +9,7 @@ import sqlite3
 import requests
 from datetime import datetime
 from playwright.sync_api import sync_playwright
-
-TELEGRAM_BOT_TOKEN = "REDACTED_TELEGRAM_BOT_TOKEN"
-TELEGRAM_CHAT_ID = "716509225"
+from config import BOT_TOKEN as TELEGRAM_BOT_TOKEN, CHAT_ID as TELEGRAM_CHAT_ID
 SESSION_FILE = "/root/student-bot/storageState.json"
 DEADLINES_DB = "/root/student-bot/deadlines.db"
 MESSAGES_DB  = "/root/student-bot/messages.db"

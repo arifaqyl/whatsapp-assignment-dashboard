@@ -7,3 +7,5 @@ __pycache__/
 .env
 *.log
 STUDENT_BOT_PROJECT.md
+CLAUDE.md
+RESUME_PROMPT.md
