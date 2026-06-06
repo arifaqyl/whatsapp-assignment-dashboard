@@ -27,7 +27,7 @@ This bot keeps the task list in one place:
 
 ```text
 VLE Moodle ----------.
-                     +--> Telegram Bot <-- /tasks, /list, /check
+                     +--> Telegram Bot <-- /summary, /agenda, /check
 WhatsApp Groups -----'
 ```
 
@@ -46,7 +46,7 @@ WhatsApp Groups -----'
 
 ![Dashboard preview](docs/demo-dashboard.svg)
 
-The real bot renders a live urgency-first agenda that merges VLE and WhatsApp into one view.
+Illustrative preview only. The live bot renders a `/summary` dashboard that merges VLE and WhatsApp into one view.
 
 ## Tech Stack
 
@@ -64,6 +64,8 @@ The real bot renders a live urgency-first agenda that merges VLE and WhatsApp in
 ## Telegram Commands
 
 ```text
+/summary        main merged dashboard
+/agenda         alias for /summary
 /tasks          pending deadline tasks
 /check 5        mark task 5 done
 /list           pending WhatsApp messages
