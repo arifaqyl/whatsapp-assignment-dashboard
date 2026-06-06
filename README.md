@@ -7,8 +7,6 @@
 Academic tracker for universities that run a Moodle-style VLE and WhatsApp groups.
 It pulls deadlines from course pages and PDFs, watches course WhatsApp groups through WAHA, and turns the noise into one compact Telegram dashboard.
 
-Maintained by Arif Aqyl.
-
 Formerly `student-bot`.
 
 ## What It Does
@@ -31,7 +29,7 @@ VLE Moodle ----------.
 WhatsApp Groups -----'
 ```
 
-## Features
+## Highlights
 
 - Deep VLE scraping with Playwright
 - PDF/resource-name scanning before downloads
