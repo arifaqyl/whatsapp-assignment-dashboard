@@ -2,9 +2,11 @@ import requests
 import sqlite3
 from config import BOT_TOKEN, CHAT_ID
 from datetime import datetime
+from deadline_utils import is_active_due
+from paths import DEADLINES_DB as DEADLINES_DB_PATH
 
 BASE = f"https://api.telegram.org/bot{BOT_TOKEN}"
-DEADLINES_DB = "/root/student-bot/deadlines.db"
+DEADLINES_DB = str(DEADLINES_DB_PATH)
 
 
 def send(text):
@@ -23,7 +25,7 @@ def get_pending_deadlines():
             "SELECT id, task, course, due FROM deadlines WHERE status != 'Done' ORDER BY id"
         ).fetchall()
         conn.close()
-        return rows
+        return [row for row in rows if is_active_due(row[3])]
     except Exception:
         return []
 

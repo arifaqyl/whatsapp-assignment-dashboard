@@ -8,21 +8,26 @@ import html
 import sqlite3
 import requests
 from datetime import datetime
+from urllib.parse import unquote, urlparse
 from playwright.sync_api import sync_playwright
+import config as app_config
 from config import BOT_TOKEN as TELEGRAM_BOT_TOKEN, CHAT_ID as TELEGRAM_CHAT_ID
-SESSION_FILE = "/root/student-bot/storageState.json"
-DEADLINES_DB = "/root/student-bot/deadlines.db"
-MESSAGES_DB  = "/root/student-bot/messages.db"
-
-# All 6 courses from timetable
-COURSES = {
-    "IEB20603": "DATABASE",
-    "ISB16003": "OOP",
-    "ISB16204": "COOS",
-    "IGB20303": "PROB STAT",
-    "IEB20703": "OOSAD",
-    "WEB20202": "PE",
-}
+from paths import DEADLINES_DB as DEADLINES_DB_PATH, MESSAGES_DB as MESSAGES_DB_PATH, SESSION_FILE as SESSION_FILE_PATH
+from deadline_utils import (
+    choose_better_source,
+    choose_better_task,
+    has_concrete_due,
+    is_generic_due,
+    normalize_task_name,
+    is_active_due,
+    should_replace_due,
+    tasks_match,
+)
+SESSION_FILE = str(SESSION_FILE_PATH)
+DEADLINES_DB = str(DEADLINES_DB_PATH)
+MESSAGES_DB = str(MESSAGES_DB_PATH)
+VLE_BASE_URL = getattr(app_config, "VLE_BASE_URL", "https://vle.example.edu.my").rstrip("/")
+COURSES = getattr(app_config, "VLE_COURSES", {})
 
 ASSIGNMENT_KEYWORDS = re.compile(
     r'\b(?:assignment|project|quiz|quizzes|report|submission|submit|lab|task|exercise|test|exam|proposal'
@@ -75,11 +80,7 @@ def init_db():
 
 
 def _clean_task_name(task):
-    """Strip leading bullets/symbols and trailing punctuation from task names."""
-    task = re.sub(r'^[•\-\*·]+\s*', '', task).strip()  # leading bullets
-    task = re.sub(r'[,;.]+\s*$', '', task).strip()      # trailing punctuation
-    task = re.sub(r'\s{2,}', ' ', task)
-    return task
+    return normalize_task_name(task)
 
 
 def _is_stale_date(due_str):
@@ -99,28 +100,27 @@ def add_if_new(conn, task, course, due, source='vle'):
         return False
     if len(task) < 3:
         return False
-    # Normalize for dedup: ignore [PDF/Resource] prefix and whitespace
-    norm = re.sub(r'^\[PDF/Resource\]\s*', '', task, flags=re.IGNORECASE).strip().lower()
-    exists = conn.execute(
-        "SELECT id, due FROM deadlines WHERE LOWER(TRIM(REPLACE(task,'[PDF/Resource] ',''))) = ?",
-        (norm,)
-    ).fetchone()
-    if exists:
-        row_id, existing_due = exists
-        existing_due_upper = (existing_due or '').upper()
-        new_due_upper = (due or '').upper()
-        
-        is_existing_generic = any(x in existing_due_upper for x in ('VLE', 'CLP', 'SEE', 'TBD', 'N/A')) or not existing_due
-        is_new_generic = any(x in new_due_upper for x in ('VLE', 'CLP', 'SEE', 'TBD', 'N/A')) or not due
-        
-        if is_existing_generic and not is_new_generic:
+    rows = conn.execute(
+        "SELECT id, task, due, source FROM deadlines WHERE course = ? AND status != 'Done'",
+        (course,)
+    ).fetchall()
+    for row_id, existing_task, existing_due, existing_source in rows:
+        if not tasks_match(existing_task, task):
+            continue
+        next_task = choose_better_task(existing_task, task)
+        next_due = due if should_replace_due(existing_due, due, existing_source, source) else existing_due
+        next_source = choose_better_source(existing_source, source)
+        changed = (next_task != existing_task) or (next_due != existing_due) or (next_source != existing_source)
+        if changed:
             conn.execute(
-                "UPDATE deadlines SET due = ?, source = ? WHERE id = ?",
-                (due, source, row_id)
+                "UPDATE deadlines SET task = ?, due = ?, source = ? WHERE id = ?",
+                (next_task, next_due, next_source, row_id)
             )
             conn.commit()
-            print(f"    * updated due date for '{task}' from '{existing_due}' to '{due}'")
+            print(f"    * updated task '{existing_task}' -> '{next_task}' | due '{existing_due}' -> '{next_due}'")
             return True
+        if is_generic_due(existing_due) and is_generic_due(due):
+            return False
         return False
     conn.execute(
         "INSERT INTO deadlines (task, course, due, source) VALUES (?,?,?,?)",
@@ -152,6 +152,53 @@ DEADLINE_CONTEXT_RE = re.compile(
     r'(?:due|deadline|submit(?:ted)?|submission)\s*[:\-–]?\s*(.{0,80})',
     re.IGNORECASE
 )
+
+EXPLICIT_TASK_RE = re.compile(
+    r'\b(?:assignment\s*\d+|quiz\s*\d+|test\s*\d+|lab\s*test|mid\s*term|final\s+exam|final\s+examination|'
+    r'group\s+project|mini\s+project|project\s+report|project\s+presentation|proposal)\b',
+    re.IGNORECASE
+)
+
+RESOURCE_NOISE_RE = re.compile(
+    r'^(announcement|notice|welcome|news|forum|lecture|slide|chapter|week|topic|template|sample|exercise|'
+    r'tutorial|note|reading|handout|material|reference|rubric|syllabus|coursework|solution|answers?|recording|'
+    r'calendar|guide|introduction|overview|slides?)\b',
+    re.IGNORECASE
+)
+
+
+def _norm_resource_label(text):
+    text = unquote(text or "")
+    text = text.split("#", 1)[0].split("?", 1)[0]
+    text = os.path.basename(text)
+    text = re.sub(r'\.(pdf|docx?|pptx?|ppt|txt|zip|rar)$', '', text, flags=re.IGNORECASE)
+    text = text.replace("_", " ").replace("-", " ")
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text
+
+
+def _extract_due_hint(text):
+    if not text:
+        return None
+    match = DATE_RE.search(text)
+    return match.group(0) if match else None
+
+
+def _resource_hints(*parts):
+    blobs = [p for p in parts if p]
+    combined = " | ".join(blobs)
+    filename_due = _extract_due_hint(_norm_resource_label(combined))
+    if filename_due:
+        return filename_due
+    return _extract_due_hint(combined)
+
+
+def _is_low_signal_resource(text):
+    return bool(RESOURCE_NOISE_RE.search(text or ""))
+
+
+def _skip(reason, task_name):
+    print(f"    ~ skip {reason}: {task_name[:80]}")
 
 
 def _extract_text_from_file(data, filename=''):
@@ -248,6 +295,10 @@ def _moodle_get_file_text(page, resource_url):
 def read_pdf_deadline(page, resource_url):
     """Download a Moodle resource and extract the first due date found."""
     try:
+        url_name = _norm_resource_label(resource_url)
+        hinted = _extract_due_hint(url_name)
+        if hinted:
+            return hinted
         text = _moodle_get_file_text(page, resource_url)
         if not text:
             return None
@@ -265,10 +316,53 @@ def read_pdf_deadline(page, resource_url):
     return None
 
 
+def _has_real_due(due):
+    return bool(due and DATE_RE.search(due))
+
+
+def _clean_clp_task_text(task_text):
+    task_text = re.sub(r'^[•\-\*·]+\s*', '', task_text).strip()
+    task_text = re.sub(r'[,;:]+\s*$', '', task_text).strip()
+    task_text = re.sub(r'\s{2,}', ' ', task_text)
+    return task_text
+
+
+def _should_keep_clp_task(task_text, due):
+    lower = task_text.lower()
+    if not _has_real_due(due):
+        return False
+    generic = {
+        "assignment", "project", "proposal", "presentation", "practical",
+        "test", "quiz", "lab exercise", "assessment(s) lab report"
+    }
+    if lower in generic:
+        return False
+    if len(task_text) < 6:
+        return False
+    return True
+
+
+def purge_noisy_clp_rows(conn):
+    """Remove old low-confidence CLP rows that only carry placeholders."""
+    rows = conn.execute(
+        "SELECT id, task, due FROM deadlines WHERE status != 'Done' AND source = 'vle-clp'"
+    ).fetchall()
+    removed = 0
+    for row_id, task, due in rows:
+        task = _clean_clp_task_text(task or "")
+        if _should_keep_clp_task(task, due):
+            continue
+        conn.execute("DELETE FROM deadlines WHERE id = ?", (row_id,))
+        removed += 1
+    if removed:
+        conn.commit()
+        print(f"  Purged {removed} noisy CLP row(s)")
+    return removed
+
+
 def extract_clp_deadlines(page, resource_url, course_code):
     """Read a Course Learning Plan and extract assessment names.
-    CLPs typically list week-based schedules without exact dates, so we save
-    assessments as tasks with 'See CLP' due date for the student to fill in."""
+    CLPs are noisy, so only keep dated, specific assessment lines."""
     tasks = []
     try:
         text = _moodle_get_file_text(page, resource_url)
@@ -308,16 +402,16 @@ def extract_clp_deadlines(page, resource_url, course_code):
             # Keep lines with assessment keyword AND weight %, or short keyword-only lines
             if has_keyword and (has_weight or len(line) <= 40):
                 # Try to find a date nearby (within 5 lines)
-                due = "See CLP"
+                due = None
                 for j in range(max(0, i-5), min(len(lines), i+6)):
                     d = DATE_RE.search(lines[j])
                     if d:
                         due = d.group(0)
                         break
 
-                task_text = re.sub(r'\s{2,}', ' ', line).strip()[:80]
+                task_text = _clean_clp_task_text(line)[:80]
                 norm = task_text.lower()
-                if len(task_text) > 4 and norm not in seen:
+                if _should_keep_clp_task(task_text, due) and norm not in seen:
                     seen.add(norm)
                     tasks.append((task_text, due))
 
@@ -332,6 +426,18 @@ def extract_course_code(text):
     return m.group(1) if m else None
 
 
+def derive_course_key(text, href):
+    code = extract_course_code(text)
+    if code:
+        return code
+    label = re.sub(r'\s+', ' ', (text or '')).strip()
+    label = re.sub(r'\s*\|\s*.*$', '', label)
+    label = label[:80].strip()
+    if not label:
+        label = (href or '').rstrip('/').split('/')[-1]
+    return label or href
+
+
 def clean_name(name):
     name = re.sub(r'\s+is due\s*$', '', name, flags=re.IGNORECASE)
     name = re.sub(r'\s{2,}', ' ', name)
@@ -342,10 +448,10 @@ def try_sso_refresh(page, ctx):
     """Attempt SSO auto-refresh if Moodle session expired."""
     import time
     print("  Session expired — trying SSO auto-refresh...")
-    page.goto("https://vle.unikl.edu.my/auth/oidc/", timeout=30000)
+    page.goto(f"{VLE_BASE_URL}/auth/oidc/", timeout=30000)
     for _ in range(20):
         time.sleep(1)
-        if "vle.unikl.edu.my/my" in page.url:
+        if VLE_BASE_URL.rstrip("/") + "/my" in page.url:
             print("  SSO refresh OK!")
             ctx.storage_state(path=SESSION_FILE)
             return True
@@ -422,7 +528,7 @@ def scrape_course(page, course_url, course_code, conn):
 
     # ── Step 1: collect all activity metadata BEFORE any navigation ──
     # This avoids DOM context errors from stale ElementHandle references.
-    activities = []  # list of (task_name, href, modtype, due_inline)
+    activities = []  # list of (task_name, href, modtype, due_inline, title, aria)
     items = page.query_selector_all('[data-activityname]')
     print(f"    Activities found: {len(items)}")
 
@@ -473,28 +579,82 @@ def scrape_course(page, course_url, course_code, conn):
                       or item.query_selector('.activity-dates'))
             due_inline = due_el.inner_text().strip() if due_el else None
 
-            activities.append((task_name, href, modtype, due_inline))
+            aria = item.get_attribute('aria-label') or ''
+            title = item.get_attribute('title') or ''
+            block_text = " ".join(filter(None, [
+                task_name,
+                href,
+                aria,
+                title,
+                item.inner_text().strip() if hasattr(item, "inner_text") else "",
+            ]))
+            if not due_inline:
+                due_inline = _extract_due_hint(block_text)
+            if not modtype and _is_low_signal_resource(block_text):
+                modtype = 'resource'
+
+            activities.append((task_name, href, modtype, due_inline, title, aria))
         except Exception as e:
             print(f"    ! collect error: {e}")
+
+    # ── Step 1b: scan raw page text for deadline blocks not exposed as activity cards ──
+    try:
+        body_text = page.locator("body").inner_text()
+        extra_deadlines = []
+
+        patterns = [
+            (
+                re.compile(
+                    r'(?is)\bFinal Project\b.{0,800}?Deadline for submission:\s*([A-Za-z]+\s+\d{1,2},\s*\d{4}[^.\n]*)'
+                ),
+                "Final Project",
+            ),
+            (
+                re.compile(
+                    r'(?is)\bProject Group\b.{0,800}?(?:due|deadline)[^\n:]*[: ]\s*([A-Za-z]+\s+\d{1,2},\s*\d{4}[^.\n]*|\d{1,2}/\d{1,2}/\d{2,4}[^.\n]*)'
+                ),
+                "Project Group",
+            ),
+        ]
+
+        for pattern, task_label in patterns:
+            for match in pattern.finditer(body_text):
+                due = match.group(1).strip()
+                if DATE_RE.search(due):
+                    extra_deadlines.append((task_label, due))
+
+        for task_name, due in extra_deadlines:
+            source = f'vle-{course_name.lower()}'
+            if add_if_new(conn, task_name, course_name, due[:80], source):
+                added.append((task_name, course_code, due[:80]))
+                print(f"    + [page-text] {task_name[:50]}  due: {due[:30]}")
+    except Exception as e:
+        print(f"    ! page-text scan error: {e}")
 
     # ── Step 2: process each activity, navigating only when needed ──
     # For PE (WEB20202): skip items from other sections. Arif is in L07.
     pe_section_re = re.compile(r'\bL0[0-9]\b', re.IGNORECASE)
 
-    for task_name, href, modtype, due_inline in activities:
+    for task_name, href, modtype, due_inline, title, aria in activities:
         try:
             if not task_name or len(task_name) < 3:
                 continue
 
             is_assign_type = modtype in ('assign', 'quiz')
             is_keyword_match = ASSIGNMENT_KEYWORDS.search(task_name)
+            resource_blob = " ".join(filter(None, [
+                task_name,
+                href,
+                modtype,
+                title,
+                aria,
+                _norm_resource_label(href),
+            ]))
 
             # Skip study materials (Sample Proposal, Exercise files, Lecture Notes etc.)
             # These match keywords like "exercise" but aren't graded submissions.
-            if modtype == 'resource' and re.match(
-                r'^(sample\s|exercise\s*[-–]|lecture\s|slide|study\s+guide|tutorial\s+note|note[s]?\s)',
-                task_name, re.IGNORECASE
-            ):
+            if modtype == 'resource' and _is_low_signal_resource(resource_blob):
+                _skip("low-signal resource", task_name)
                 continue
 
             # PE section filter: keep only L07 and generic (no section suffix) items
@@ -505,6 +665,7 @@ def scrape_course(page, course_url, course_code, conn):
 
             # Skip Moodle announcement forum posts (not actual tasks)
             if task_name.startswith('📢') or re.match(r'^Announcement[s]?[\s:–—]', task_name, re.IGNORECASE):
+                _skip("announcement", task_name)
                 continue
 
             is_clp = COURSE_PLAN_KEYWORDS.search(task_name)
@@ -529,7 +690,10 @@ def scrape_course(page, course_url, course_code, conn):
             # For linked files (resource/page or unknown): download via requests and extract deadline
             if (not due) and href and modtype not in ('forum', 'label', 'assign', 'quiz'):
                 try:
-                    pdf_due = read_pdf_deadline(page, href)
+                    # First try filename/link hints before downloading content.
+                    pdf_due = _resource_hints(task_name, href, title, aria)
+                    if not pdf_due:
+                        pdf_due = read_pdf_deadline(page, href)
                     if pdf_due:
                         due = pdf_due
                 except Exception as e:
@@ -539,6 +703,7 @@ def scrape_course(page, course_url, course_code, conn):
             if is_clp:
                 if course_code == 'WEB20202':
                     # Skip PE CLP entirely to avoid parsing slide-deck templates and garbage lines as tasks
+                    _skip("PE CLP", task_name)
                     continue
                 if href:
                     try:
@@ -555,6 +720,16 @@ def scrape_course(page, course_url, course_code, conn):
                 if not is_assign_type and not is_keyword_match:
                     continue
 
+            # Avoid adding plain resource titles with no actual date.
+            if modtype in ('resource', 'page', 'url') and not due and not is_clp:
+                _skip("undated resource", task_name)
+                continue
+
+            # For assign/quiz, keep undated items only if they look explicitly actionable.
+            if modtype in ('assign', 'quiz') and not due and not EXPLICIT_TASK_RE.search(task_name):
+                _skip("weak undated activity", task_name)
+                continue
+
             due = (due or "See VLE").strip()[:80]
             source = f'vle-{course_name.lower()}'
 
@@ -569,21 +744,23 @@ def scrape_course(page, course_url, course_code, conn):
     # ── Fallback: if nothing was added, scan ALL resources for project briefs ──
     if not added and course_code != 'WEB20202':
         print(f"    [fallback] 0 tasks found — reading all PDFs/pages for project info...")
-        for task_name, href, modtype, _ in activities:
+        for task_name, href, modtype, _, title, aria in activities:
             if modtype not in ('resource', 'page', 'url') or not href:
                 continue
             # Skip things that are clearly not assignment documents (study/lecture materials)
-            if re.match(r'^(announcement|notice|welcome|news|forum)\b', task_name, re.IGNORECASE) or re.search(
-                r'lecture|slide|chapter|week|topic|template|sample|exercise|tutorial|note|reading|handout|material|reference|rubric|syllabus|coursework',
-                task_name, re.IGNORECASE
-            ):
+            if _is_low_signal_resource(task_name) or _is_low_signal_resource(_norm_resource_label(href)):
+                _skip("low-signal fallback resource", task_name)
+                continue
+            if not re.search(r'project|assignment|quiz|test|proposal|brief', task_name, re.IGNORECASE):
+                _skip("fallback missing project/assignment keywords", task_name)
                 continue
             try:
-                clp_tasks = extract_clp_deadlines(page, href, course_code)
-                for ct_name, ct_due in clp_tasks:
-                    if add_if_new(conn, ct_name, course_name, ct_due, 'vle-clp'):
-                        added.append((ct_name, course_code, ct_due))
-                        print(f"    + [fallback] {ct_name[:50]}  due: {ct_due[:30]}")
+                pdf_due = _resource_hints(task_name, href, title, aria)
+                if not pdf_due:
+                    pdf_due = read_pdf_deadline(page, href)
+                if pdf_due and add_if_new(conn, task_name, course_name, pdf_due, f'vle-{course_name.lower()}'):
+                    added.append((task_name, course_code, pdf_due))
+                    print(f"    + [fallback] {task_name[:50]}  due: {pdf_due[:30]}")
             except Exception as e:
                 print(f"    ! fallback error for {task_name[:40]}: {e}")
 
@@ -595,13 +772,14 @@ def scrape_course(page, course_url, course_code, conn):
 def run():
     ts = datetime.now().strftime('%H:%M:%S')
     print(f"[{ts}] VLE Deep Scraper starting...")
-    tg("🔄 <b>VLE Deep Scraper</b>\nLoading all 6 course pages...")
+    tg("🔄 <b>VLE Deep Scraper</b>\nLoading course pages...")
 
     if not os.path.exists(SESSION_FILE):
         tg("❌ storageState.json not found.")
         return
 
     conn = init_db()
+    purge_noisy_clp_rows(conn)
     all_added = []
 
     with sync_playwright() as p:
@@ -611,7 +789,7 @@ def run():
 
         # Load dashboard
         print("Loading VLE...")
-        page.goto("https://vle.unikl.edu.my/my/", timeout=60000)
+        page.goto(f"{VLE_BASE_URL}/my/", timeout=60000)
         page.wait_for_load_state("networkidle", timeout=20000)
 
         if "microsoftonline.com" in page.url:
@@ -622,41 +800,34 @@ def run():
             if not try_sso_refresh(page, ctx):
                 tg("⚠️ <b>Session Expired</b>\nRun get_session.py locally.")
                 b.close(); conn.close(); return
-            page.goto("https://vle.unikl.edu.my/my/", timeout=30000)
+            page.goto(f"{VLE_BASE_URL}/my/", timeout=30000)
             page.wait_for_load_state("networkidle", timeout=15000)
 
-        # Discover course URLs from dashboard
-        course_map = {}  # code -> url
+        # Discover course URLs from the full courses page only.
+        # The dashboard contains repeated cards and timeline links that can
+        # misassociate a course code with the wrong href.
+        course_map = {}  # course key -> url
+        page.goto(f"{VLE_BASE_URL}/my/courses.php", timeout=20000)
+        page.wait_for_load_state("networkidle", timeout=10000)
         links = page.query_selector_all('a[href*="course/view.php"]')
         for link in links:
             href = link.get_attribute('href') or ''
-            text = link.inner_text().strip()
-            code = extract_course_code(text) or extract_course_code(href)
-            if code and code in COURSES and code not in course_map:
-                course_map[code] = href
-                print(f"  Found course: {code} → {href}")
-
-        # If any courses not found by link text, try the "All courses" / enrolment API
-        missing = [c for c in COURSES if c not in course_map]
-        if missing:
-            print(f"  Missing via links: {missing}, trying course search...")
-            page.goto("https://vle.unikl.edu.my/my/courses.php", timeout=20000)
-            page.wait_for_load_state("networkidle", timeout=10000)
-            links2 = page.query_selector_all('a[href*="course/view.php"]')
-            for link in links2:
-                href = link.get_attribute('href') or ''
-                text = (link.inner_text() + " " + href)
-                code = extract_course_code(text)
-                if code and code in COURSES and code not in course_map:
-                    course_map[code] = href
-                    print(f"  Found (courses page): {code} → {href}")
+            text = (link.inner_text() + " " + href)
+            code = extract_course_code(text)
+            if COURSES and code and code not in COURSES:
+                continue
+            key = code or derive_course_key(text, href)
+            if key and key not in course_map:
+                course_map[key] = href
+                print(f"  Found course: {key} → {href}")
 
         print(f"\nCourses found: {list(course_map.keys())}")
-        print(f"Missing: {[c for c in COURSES if c not in course_map]}")
+        if COURSES:
+            print(f"Missing: {[c for c in COURSES if c not in course_map]}")
 
         # Deep-scrape each course
-        for code, url in course_map.items():
-            added = scrape_course(page, url, code, conn)
+        for course_key, url in course_map.items():
+            added = scrape_course(page, url, course_key, conn)
             all_added.extend(added)
 
         b.close()
@@ -665,34 +836,31 @@ def run():
     # ── Build unified report ──────────────────────────────────
     conn2 = sqlite3.connect(DEADLINES_DB)
     pending = conn2.execute(
-        "SELECT id, task, course, due FROM deadlines WHERE status != 'Done' ORDER BY course, id"
+        "SELECT id, course, task, due, source FROM deadlines WHERE status != 'Done'"
     ).fetchall()
     conn2.close()
-
-    wa_msgs = get_wa_messages(10)
+    from gemini_dashboard import deduplicate_tasks
+    pending = deduplicate_tasks(pending)
+    pending = [row for row in pending if has_concrete_due(row[3]) and is_active_due(row[3])]
 
     # Group pending by course
     by_course = {}
-    for id_, task, course, due in pending:
-        by_course.setdefault(course, []).append((id_, task, due))
+    for id_str, course, task, due, source in pending:
+        by_course.setdefault(course, []).append((id_str, task, due, source))
 
     lines = [f"📚 <b>VLE Deep Scrape Done</b>  {len(all_added)} new task(s)\n"]
-    lines.append(f"<b>All Pending Tasks ({len(pending)})</b>\n")
+    lines.append(f"<b>Current Pending Tasks ({len(pending)})</b>\n")
 
     for code, tasks in by_course.items():
         lines.append(f"<b>── {code} ──</b>")
-        for id_, task, due in tasks:
-            lines.append(f"  {id_}. {task[:55]}\n      📅 {due[:50]}")
+        for id_str, task, due, source in tasks:
+            lines.append(f"  {id_str}. {task[:55]}\n      📅 {due[:50]}")
         lines.append("")
 
-    if wa_msgs:
-        lines.append(f"\n<b>── WhatsApp Messages ({len(wa_msgs)}) ──</b>")
-        for group, sender, msg, ts in wa_msgs:
-            lines.append(f"  <b>{group}</b>: {msg[:80]}")
-    else:
-        lines.append("\n<b>── WhatsApp ──</b>\n  No messages yet (scan QR to connect)")
+    if not all_added:
+        lines.append("<i>No new VLE tasks were found in this pass. This usually means the pending list is unchanged, not that the scraper failed.</i>")
 
-    lines.append("\n<i>/tasks — manage tasks  |  /list — WA messages  |  /scrape — rescan now</i>")
+    lines.append("\n<i>/tasks — full task list  |  /summary — focused dashboard  |  /scrape — rescan now</i>")
 
     tg("\n".join(lines))
     print(f"\nDone. {len(all_added)} new, {len(pending)} total pending.")

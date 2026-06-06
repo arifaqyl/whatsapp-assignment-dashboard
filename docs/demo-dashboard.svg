@@ -1,0 +1,57 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="860" viewBox="0 0 1400 860">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0b1020"/>
+      <stop offset="100%" stop-color="#131b33"/>
+    </linearGradient>
+    <linearGradient id="card" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#18223f"/>
+      <stop offset="100%" stop-color="#10182d"/>
+    </linearGradient>
+    <style>
+      .t1{font:700 34px Inter,Segoe UI,Arial,sans-serif; fill:#eef2ff}
+      .t2{font:500 16px Inter,Segoe UI,Arial,sans-serif; fill:#aeb8de}
+      .h{font:700 18px Inter,Segoe UI,Arial,sans-serif; fill:#f8fafc}
+      .b{font:500 15px Inter,Segoe UI,Arial,sans-serif; fill:#dbe4ff}
+      .m{font:500 13px Inter,Segoe UI,Arial,sans-serif; fill:#8f9ac7}
+      .chip{font:700 12px Inter,Segoe UI,Arial,sans-serif; fill:#0b1020}
+    </style>
+  </defs>
+  <rect width="1400" height="860" rx="36" fill="url(#bg)"/>
+  <circle cx="1220" cy="110" r="130" fill="#24315c" opacity=".35"/>
+  <circle cx="180" cy="760" r="180" fill="#2c214f" opacity=".25"/>
+
+  <text x="72" y="84" class="t1">Student Bot</text>
+  <text x="72" y="118" class="t2">Unified VLE + WhatsApp deadline dashboard</text>
+
+  <rect x="72" y="164" width="1256" height="560" rx="28" fill="url(#card)" stroke="#2a3560"/>
+
+  <text x="108" y="220" class="h">At a glance: 2 today, 2 this week, 3 later</text>
+
+  <rect x="108" y="252" width="96" height="28" rx="14" fill="#7dd3fc"/>
+  <text x="124" y="271" class="chip">TODAY</text>
+  <text x="108" y="314" class="b">[COOS] Group Project - Project Orion — 06 Jun 2026</text>
+  <text x="108" y="346" class="m">WA: Salam warahmatullah dera students, the group project is due today.</text>
+  <text x="108" y="386" class="b">[OOP] Group Project (Esports Roster Manager) — 06 Jun 2026</text>
+
+  <rect x="700" y="252" width="118" height="28" rx="14" fill="#a7f3d0"/>
+  <text x="719" y="271" class="chip">THIS WEEK</text>
+  <text x="700" y="314" class="b">[OOSAD] Exam 9 &amp; 10 June 2026 — 10 Jun 2026</text>
+  <text x="700" y="346" class="m">WA: Exam 9 &amp; 10 June 2026</text>
+  <text x="700" y="386" class="b">[COOS] Live Presentation &amp; Demo — 13 Jun 2026</text>
+
+  <rect x="108" y="462" width="84" height="28" rx="14" fill="#f9a8d4"/>
+  <text x="124" y="481" class="chip">LATER</text>
+  <text x="108" y="524" class="b">[PE] Resume, Cover Letter &amp; Mock Interview — 14 Jun 2026</text>
+  <text x="108" y="556" class="b">[PROB STAT] Final Project — 18 Jun 2026</text>
+  <text x="108" y="588" class="b">[DATABASE] Final Examination Week — 04 Jul 2026</text>
+
+  <rect x="700" y="462" width="122" height="28" rx="14" fill="#fde68a"/>
+  <text x="719" y="481" class="chip">FOCUS</text>
+  <text x="700" y="526" class="b">Prioritize COOS: Project Orion</text>
+  <text x="700" y="558" class="m">Grounded in saved VLE rows and WhatsApp messages.</text>
+  <text x="700" y="590" class="m">Use /summary for the merged view. /check and /done are the action commands.</text>
+
+  <rect x="72" y="756" width="1256" height="56" rx="18" fill="#0c1326" stroke="#2a3560"/>
+  <text x="108" y="790" class="t2">Public-safe. Generic VLE support. Local config only. MIT licensed.</text>
+</svg>

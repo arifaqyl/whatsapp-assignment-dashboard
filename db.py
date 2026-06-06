@@ -1,7 +1,8 @@
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
+from paths import MESSAGES_DB
 
-DB = "/root/student-bot/messages.db"
+DB = str(MESSAGES_DB)
 
 
 def init():
@@ -49,6 +50,29 @@ def get_all(include_done=False):
         ).fetchall()
     conn.close()
     return rows
+
+
+def get_recent_pending(max_age_days=14):
+    cutoff = (datetime.now() - timedelta(days=max_age_days)).isoformat()
+    conn = sqlite3.connect(DB)
+    rows = conn.execute(
+        "SELECT id, group_name, sender, message, timestamp, done "
+        "FROM messages WHERE done=0 AND timestamp >= ? ORDER BY id DESC",
+        (cutoff,)
+    ).fetchall()
+    conn.close()
+    return rows
+
+
+def count_old_pending(max_age_days=14):
+    cutoff = (datetime.now() - timedelta(days=max_age_days)).isoformat()
+    conn = sqlite3.connect(DB)
+    count = conn.execute(
+        "SELECT COUNT(*) FROM messages WHERE done=0 AND timestamp < ?",
+        (cutoff,)
+    ).fetchone()[0]
+    conn.close()
+    return count
 
 
 def mark_done(item_id):

@@ -1,40 +1,15 @@
 import sqlite3
-import re
-from datetime import datetime, date
+from paths import DEADLINES_DB
+from deadline_utils import (
+    choose_better_source,
+    choose_better_task,
+    is_generic_due,
+    parse_due_date,
+    should_replace_due,
+    tasks_match,
+)
 
-DB = "/root/student-bot/deadlines.db"
-
-
-def _parse_due(due_str):
-    """Parse due date string for sorting. Unparseable -> pushed to end."""
-    if not due_str:
-        return date(9999, 12, 31)
-    s = due_str.strip()
-    
-    # Extract clean date pattern if present
-    m = re.search(r'(\d{1,2}\s+[A-Za-z]{3,9}\s+\d{2,4})', s)
-    if m:
-        s = m.group(1)
-    else:
-        m = re.search(r'(\d{1,2}/\d{1,2}/\d{2,4})', s)
-        if m:
-            s = m.group(1)
-        else:
-            m = re.search(r'(\d{4}-\d{2}-\d{2})', s)
-            if m:
-                s = m.group(1)
-                
-    for fmt in ('%d %b %Y', '%d %B %Y', '%d %b %y', '%d %B %y', '%d/%m/%y', '%d/%m/%Y', '%Y-%m-%d'):
-        try:
-            return datetime.strptime(s, fmt).date()
-        except ValueError:
-            pass
-            
-    su = due_str.upper()
-    if 'VLE' in su or 'CLP' in su or 'TBD' in su or 'N/A' in su or 'SEE' in su:
-        return date(9999, 12, 31)
-        
-    return date(9999, 12, 30)
+DB = str(DEADLINES_DB)
 
 
 def init():
@@ -55,12 +30,27 @@ def init():
 
 
 def add(task, course, due, source='manual'):
-    """Returns (id, 'added') or (None, 'duplicate')."""
+    """Returns (id, 'added'|'updated') or (None, 'duplicate')."""
     conn = sqlite3.connect(DB)
-    exists = conn.execute(
-        "SELECT id FROM deadlines WHERE LOWER(TRIM(task)) = LOWER(TRIM(?))", (task,)
-    ).fetchone()
-    if exists:
+    rows = conn.execute(
+        "SELECT id, task, due, source FROM deadlines WHERE course = ? AND status != 'Done'",
+        (course,)
+    ).fetchall()
+    for row_id, existing_task, existing_due, existing_source in rows:
+        if not tasks_match(existing_task, task):
+            continue
+        next_task = choose_better_task(existing_task, task)
+        next_due = due if should_replace_due(existing_due, due, existing_source, source) else existing_due
+        next_source = choose_better_source(existing_source, source)
+        changed = (next_task != existing_task) or (next_due != existing_due) or (next_source != existing_source)
+        if changed:
+            conn.execute(
+                "UPDATE deadlines SET task=?, due=?, source=? WHERE id=?",
+                (next_task, next_due, next_source, row_id)
+            )
+            conn.commit()
+            conn.close()
+            return row_id, 'updated'
         conn.close()
         return None, 'duplicate'
     conn.execute(
@@ -71,6 +61,27 @@ def add(task, course, due, source='manual'):
     row_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
     conn.close()
     return row_id, 'added'
+
+
+def cancel(task, course, due=None):
+    conn = sqlite3.connect(DB)
+    rows = conn.execute(
+        "SELECT id, task, due FROM deadlines WHERE course = ? AND status != 'Done'",
+        (course,)
+    ).fetchall()
+    removed = []
+    for row_id, existing_task, existing_due in rows:
+        if not tasks_match(existing_task, task):
+            continue
+        if due and existing_due and not is_generic_due(existing_due):
+            if parse_due_date(existing_due) != parse_due_date(due):
+                continue
+        conn.execute("DELETE FROM deadlines WHERE id=?", (row_id,))
+        removed.append(row_id)
+    if removed:
+        conn.commit()
+    conn.close()
+    return removed
 
 
 def get_all(include_done=False):
@@ -84,8 +95,12 @@ def get_all(include_done=False):
             "SELECT id, task, course, due, status FROM deadlines WHERE status != 'Done'"
         ).fetchall()
     conn.close()
-    rows.sort(key=lambda r: _parse_due(r[3]))
+    rows.sort(key=lambda r: parse_due_date(r[3]))
     return rows
+
+
+def _parse_due(due_str):
+    return parse_due_date(due_str)
 
 
 def mark_done(deadline_id):

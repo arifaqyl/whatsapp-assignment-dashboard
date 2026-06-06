@@ -1,6 +1,7 @@
 import sqlite3
+from paths import DEADLINES_DB as DEADLINES_DB_PATH
 
-DB_PATH = "/root/student-bot/deadlines.db"
+DB_PATH = str(DEADLINES_DB_PATH)
 
 conn = sqlite3.connect(DB_PATH)
 cur = conn.cursor()
@@ -11,7 +12,9 @@ CREATE TABLE IF NOT EXISTS deadlines (
     task TEXT NOT NULL,
     course TEXT NOT NULL,
     due TEXT NOT NULL,
-    status TEXT NOT NULL
+    status TEXT NOT NULL,
+    source TEXT DEFAULT 'manual',
+    added TEXT DEFAULT CURRENT_TIMESTAMP
 )
 """)
 
