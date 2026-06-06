@@ -115,3 +115,7 @@ WAHA Docker <--> WhatsApp <--> webhook receiver
 ## License
 
 MIT. See [LICENSE](LICENSE).
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) and the GitHub issue templates under `.github/`.
