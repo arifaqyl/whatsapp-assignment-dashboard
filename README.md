@@ -1,5 +1,9 @@
 # whatsapp-assignment-dashboard
 
+<p align="center">
+  <img src="docs/blue-box.gif" alt="Blue box banner" width="100%" />
+</p>
+
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 ![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-blue.svg)
 ![WAHA](https://img.shields.io/badge/WAHA-WhatsApp%20Bridge-25D366.svg)
