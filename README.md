@@ -119,3 +119,7 @@ MIT. See [LICENSE](LICENSE).
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) and the GitHub issue templates under `.github/`.
+
+## Roadmap
+
+See [ROADMAP.md](ROADMAP.md) for the current public plan.
