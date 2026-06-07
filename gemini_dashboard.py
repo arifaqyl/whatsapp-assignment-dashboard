@@ -53,6 +53,39 @@ GENERIC_CLP_PREFIXES = (
     "final test",
 )
 
+WA_PRIORITY_HINTS = (
+    "submission deadline",
+    "final assessment",
+    "project presentation",
+    "project progress",
+    "project brief",
+    "deadline",
+    "due",
+    "presentation",
+    "exam",
+    "quiz",
+    "assignment",
+    "project",
+    "school visit",
+    "lecture details",
+    "venue",
+    "reschedule",
+    "postpone",
+)
+
+WA_SKIP_LINES = (
+    "dear ",
+    "assalamualaikum",
+    "salam",
+    "good morning",
+    "good afternoon",
+    "good evening",
+    "please ensure",
+    "thank you",
+    "all the best",
+    "kindly note",
+)
+
 
 def get_tasks():
     try:
@@ -227,6 +260,116 @@ def _format_due(due):
     return parsed.strftime("%d %b %Y")
 
 
+def _wa_range_hint(message):
+    text = re.sub(r"\s+", " ", (message or "").replace("–", "-").replace("—", "-")).strip()
+    match = re.search(
+        r"\b(\d{1,2})\s*-\s*(\d{1,2})\s+"
+        r"(jan|january|feb|february|mar|march|apr|april|may|jun|june|jul|july|aug|august|sep|sept|september|oct|october|nov|november|dec|december)"
+        r"(?:\s+(\d{4}))?\b",
+        text,
+        re.IGNORECASE,
+    )
+    if not match:
+        return ""
+    start = match.group(1)
+    end = match.group(2)
+    month = match.group(3)[:3].title()
+    year = match.group(4)
+    return f"{start}-{end} {month}" + (f" {year}" if year else "")
+
+
+def _summarize_wa_message(message, limit=96):
+    text = re.sub(r"\s+", " ", (message or "").replace("\r", "\n")).strip()
+    if not text:
+        return ""
+
+    parts = []
+    lower = text.lower()
+
+    deadline = re.search(r"submission deadline\s*:\s*([^.]+?)(?:\s+project presentation|\s+final assessment|$)", text, re.IGNORECASE)
+    if deadline:
+        parts.append(f"Deadline {deadline.group(1).strip().rstrip('.,;')}")
+
+    presentation = re.search(
+        r"project presentation.*?(?:week\s*\d+\s*)?\((\d{1,2}\s*[-–]\s*\d{1,2}\s+[a-z]+\s+\d{4})\)",
+        text,
+        re.IGNORECASE,
+    )
+    if presentation:
+        parts.append(f"Presentation {presentation.group(1).replace('–', '-').replace('  ', ' ')}")
+    elif "project presentation" in lower:
+        parts.append("Project Presentation")
+
+    final_assessment = re.search(
+        r"final assessment(?:\s*\(tentative\))?.*?date\s*:\s*([^.]+?)(?:\s+time\s*:\s*([^.]+))?(?:$|\s+please\s+ensure)",
+        text,
+        re.IGNORECASE,
+    )
+    if final_assessment:
+        final_bits = [final_assessment.group(1).strip().rstrip('.,;')]
+        if final_assessment.group(2):
+            final_bits.append(final_assessment.group(2).strip().rstrip('.,;'))
+        parts.append("Final " + " ".join(final_bits))
+
+    if "exam" in lower and not any(part.lower().startswith("exam ") for part in parts):
+        exam_bits = []
+        date_match = re.search(
+            r"\b(\d{1,2}[./]\d{1,2}(?:[./]\d{2,4})?|\d{1,2}\s+[a-z]+\s+\d{4})\b",
+            text,
+            re.IGNORECASE,
+        )
+        if date_match:
+            exam_bits.append(date_match.group(1).strip().rstrip('.,;'))
+        time_match = re.search(
+            r"\b(\d{1,2}(?::|\.)\d{2}\s*(?:am|pm)?\s*-\s*\d{1,2}(?::|\.)\d{2}\s*(?:am|pm)?)\b",
+            text,
+            re.IGNORECASE,
+        )
+        duration_match = re.search(r"\bduration\s*:\s*([^\n,]+)", text, re.IGNORECASE)
+        place_match = re.search(r"\b(?:place|venue)\s*:?\s*([^\n,]+)", text, re.IGNORECASE)
+        if time_match:
+            exam_bits.append(f"Time {time_match.group(1).strip().rstrip('.,;')}")
+        if duration_match:
+            exam_bits.append(f"Duration {duration_match.group(1).strip().rstrip('.,;')}")
+        if place_match:
+            exam_bits.append(f"Place {place_match.group(1).strip().rstrip('.,;')}")
+        if exam_bits:
+            parts.append("Exam " + " | ".join(exam_bits))
+        else:
+            exam_line = re.search(r"\bexam\b[^\n]*", text, re.IGNORECASE)
+            if exam_line:
+                parts.append(exam_line.group(0).strip().rstrip('.,;').capitalize())
+
+    if parts:
+        summary = " | ".join(parts)
+        if len(summary) > limit:
+            summary = summary[: limit - 1].rstrip() + "…"
+        return summary
+
+    lines = []
+    for raw in re.split(r"[\r\n]+", message or ""):
+        line = re.sub(r"\s+", " ", raw).strip(" •-*:\t")
+        if not line:
+            continue
+        line_lower = line.lower()
+        if any(line_lower.startswith(prefix) for prefix in WA_SKIP_LINES):
+            continue
+        if "http://" in line_lower or "https://" in line_lower:
+            continue
+        lines.append(line)
+
+    if not lines:
+        return ""
+
+    priority = [line for line in lines if any(hint in line.lower() for hint in WA_PRIORITY_HINTS)]
+    chosen = priority[:3] if priority else lines[:3]
+    summary = " ".join(chosen)
+    summary = re.sub(r"\s+", " ", summary).strip()
+    if len(summary) > limit:
+        summary = summary[: limit - 1].rstrip() + "…"
+    return summary
+
+
 def _is_verification_task(task, due, source):
     lower = task.lower()
     if "check vle" in lower or "check vlep" in lower:
@@ -298,8 +441,12 @@ def _format_task_line(task_row, wa_item=None):
         source_tag = "VLE"
     line = f"• [{course}] {task} — {due_text} ({source_tag}) /check_{id_str.replace(',', '_')}"
     if wa_item:
-        note = re.sub(r"\s+", " ", wa_item["message"]).strip()
-        line += f" | WA: {note[:90]}"
+        note = _summarize_wa_message(wa_item["message"], limit=80)
+        range_hint = _wa_range_hint(wa_item["message"])
+        if range_hint and range_hint not in due_text:
+            line += f" | WA: {note} [{range_hint}]"
+        elif note:
+            line += f" | WA: {note}"
     return line
 
 
@@ -316,8 +463,12 @@ def _compact_task_line(task_row, wa_item=None):
         source_tag = "VLE"
     text = f"[{course}] {task} — {due_text} ({source_tag}) /check_{id_str.replace(',', '_')}"
     if wa_item:
-        note = re.sub(r"\s+", " ", wa_item["message"]).strip()
-        text += f" | {note[:70]}"
+        note = _summarize_wa_message(wa_item["message"], limit=64)
+        range_hint = _wa_range_hint(wa_item["message"])
+        if range_hint and range_hint not in due_text:
+            text += f" | {note} [{range_hint}]"
+        elif note:
+            text += f" | {note}"
     return text
 
 
@@ -441,8 +592,12 @@ def get_dashboard():
         lines.append("")
         lines.append("🧾 <b>WA evidence</b>")
         for _, course, item in unique_wa[:2]:
-            msg = re.sub(r"\s+", " ", item["message"]).strip()
-            lines.append(f"• [{course}] {msg[:100]}")
+            msg = _summarize_wa_message(item["message"], limit=100)
+            range_hint = _wa_range_hint(item["message"])
+            if range_hint:
+                lines.append(f"• [{course}] {msg} [{range_hint}]")
+            else:
+                lines.append(f"• [{course}] {msg}")
 
     lines.append("")
     lines.append("<i>Grounded only in saved VLE rows and WhatsApp messages. Use /summary as the main view; /check and /done are the only action commands you really need.</i>")

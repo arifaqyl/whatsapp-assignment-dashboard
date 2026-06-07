@@ -94,6 +94,7 @@ def task_numbers(task):
 def task_category(task):
     lower = normalize_task_name(task).lower()
     for label, needles in (
+        ("exam", ("exam", "examination")),
         ("final_exam", ("final exam", "final examination")),
         ("midterm", ("mid term", "midterm")),
         ("quiz", ("quiz",)),

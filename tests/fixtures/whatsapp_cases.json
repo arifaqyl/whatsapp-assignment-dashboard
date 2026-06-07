@@ -1,0 +1,45 @@
+{
+  "project_progress_reminder": {
+    "group_name": "DATABASE BO1",
+    "timestamp_iso": "2026-06-04T10:00:00",
+    "message": "PROJECT PROGRESS SUBMISSION & ASSESSMENT REMINDER\n\nDear BO1 and BO2,\n\nPlease continue to submit your Project Progress through the provided Canva link. Kindly note that only Task No. 7 is required for this submission.\n\nSubmission Deadline: 5 June 2026 (Friday)\n\nProject Presentation\nPresentations will commence during Week 14 (8 - 12 June 2026) and will be conducted during your respective tutorial sessions.\n\nFinal Assessment (Tentative)\nDate: 20 June 2026 (Saturday)\nTime: 9:00 AM - 11:00 AM\n\nPlease ensure that your project progress is updated and submitted on time. Late submissions may affect your overall assessment.\n",
+    "expected_deadlines": [
+      {
+        "task": "Project Progress Submission - Task 7",
+        "due": "2026-06-05"
+      },
+      {
+        "task": "Project Presentation",
+        "due": "2026-06-08"
+      },
+      {
+        "task": "Final Assessment",
+        "due": "2026-06-20"
+      }
+    ]
+  },
+  "school_visit_reschedule": {
+    "group_name": "Project Proposal PE Group 1",
+    "timestamp_iso": "2026-06-01T10:00:00",
+    "message": "school visit instead of 11 Jun 2026 turn into 19 Jun 2026",
+    "expected_due": "2026-06-19"
+  },
+  "lecture_detail_update": {
+    "group_name": "DATABASE BO1",
+    "timestamp_iso": "2026-06-07T10:00:00",
+    "message": "Database lecture details final 19 Jun 2026 venue updated",
+    "expected_due": "2026-06-19"
+  },
+  "oosad_exam_dotted_date": {
+    "group_name": "OOSAD March 2026 MIIT",
+    "timestamp_iso": "2026-06-07T10:00:00",
+    "message": "Pls take note Group B01, exam on 9.6.2026, 1.00-2.15, venue 1807 ya",
+    "expected_due": "2026-06-09"
+  },
+  "oosad_exam_date_list": {
+    "group_name": "OOSAD March 2026 MIIT",
+    "timestamp_iso": "2026-06-07T10:00:00",
+    "message": "Exam 9 & 10 June 2026",
+    "expected_due": "2026-06-09"
+  }
+}

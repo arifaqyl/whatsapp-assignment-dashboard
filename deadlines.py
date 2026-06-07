@@ -5,6 +5,7 @@ from deadline_utils import (
     choose_better_task,
     is_generic_due,
     parse_due_date,
+    task_category,
     should_replace_due,
     tasks_match,
 )
@@ -40,7 +41,19 @@ def add(task, course, due, source='manual'):
         if not tasks_match(existing_task, task):
             continue
         next_task = choose_better_task(existing_task, task)
-        next_due = due if should_replace_due(existing_due, due, existing_source, source) else existing_due
+        next_due = existing_due
+        if should_replace_due(existing_due, due, existing_source, source):
+            next_due = due
+        else:
+            existing_due_date = parse_due_date(existing_due)
+            new_due_date = parse_due_date(due)
+            if (
+                existing_source in {"whatsapp", "whatsapp-reschedule"}
+                and source in {"whatsapp", "whatsapp-reschedule"}
+                and task_category(existing_task) == "exam"
+                and new_due_date < existing_due_date
+            ):
+                next_due = due
         next_source = choose_better_source(existing_source, source)
         changed = (next_task != existing_task) or (next_due != existing_due) or (next_source != existing_source)
         if changed:

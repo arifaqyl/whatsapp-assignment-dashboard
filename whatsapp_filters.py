@@ -5,6 +5,7 @@ BASE_KEYWORDS = (
     "assignment", "quiz", "test", "exam", "presentation", "report",
     "project", "brief", "briefing", "resit", "interview", "meeting",
     "activity", "visit", "school", "resume", "cover letter", "mock interview",
+    "lecture", "details", "schedule", "final", "midterm", "venue", "room",
     "esok", "esk", "tomorrow", "hari ni", "harini", "today",
     "malam ni", "tonight", "minggu ni", "this week", "by ",
     "kena", "must", "wajib", "compulsory", "jangan lupa", "urgent", "penting",
@@ -29,6 +30,7 @@ PE_CONTEXT_HINTS = (
 
 DATE_RE = re.compile(
     r"\b(?:"
+    r"\d{1,2}[./]\d{1,2}(?:[./]\d{2,4})?|"
     r"\d{1,2}/\d{1,2}(?:/\d{2,4})?|"
     r"\d{1,2}\s*(?:jan|feb|mar|apr|may|jun|june|jul|aug|sep|oct|nov|dec)[a-z]*\s*\d{0,4}|"
     r"(?:jan|feb|mar|apr|may|jun|june|jul|aug|sep|oct|nov|dec)[a-z]*\s*\d{1,2}(?:,\s*\d{4})?|"

@@ -53,6 +53,7 @@ ACADEMIC_HINTS = (
     "submit", "submission", "assignment", "quiz", "test", "exam",
     "project", "proposal", "report", "presentation", "lab", "briefing",
     "progress", "resume", "cover letter", "mock job interview",
+    "lecture", "details", "schedule", "final", "midterm", "venue", "room",
 )
 
 SKIP_HINTS = (
@@ -68,7 +69,8 @@ RELATIVE_DATE_CONTEXT_HINTS = (
 RESCHEDULE_HINTS = (
     "reschedule", "rescheduled", "postpone", "postponed", "cancel",
     "replacement", "replace", "changed to", "move to", "moved to",
-    "become", "changed", "new date",
+    "become", "changed", "new date", "instead of", "turn into",
+    "changed from", "change from", "replace with", "replaced with",
 )
 
 CANCEL_ONLY_HINTS = (
@@ -85,6 +87,24 @@ NOISY_CHAT_PATTERNS = (
     r"\bokay ke\b",
 )
 
+GENERIC_OPENERS = (
+    "dear ",
+    "assalamualaikum",
+    "salam",
+    "good morning",
+    "good evening",
+    "good afternoon",
+    "hello",
+    "hi ",
+    "anyway",
+)
+
+STRONG_ACTION_HINTS = (
+    "assignment", "project", "task", "submission", "submit", "deadline", "due",
+    "quiz", "test", "exam", "presentation", "final assessment", "lab",
+    "exercise", "proposal", "report", "interview", "assessment",
+)
+
 
 def infer_course(group_name):
     lower = (group_name or "").lower()
@@ -99,7 +119,7 @@ def parse_message_timestamp(timestamp_iso):
 
 
 def _parse_explicit_numeric_date(message, base_date):
-    match = re.search(r"\b(\d{1,2})/(\d{1,2})(?:/(\d{2,4}))?\b", message, re.IGNORECASE)
+    match = re.search(r"\b(\d{1,2})[/.](\d{1,2})(?:[/.](\d{2,4}))?\b", message, re.IGNORECASE)
     if not match:
         return None
     day = int(match.group(1))
@@ -152,7 +172,7 @@ def _extract_explicit_dates(message, base_date):
     dates = []
     seen = set()
 
-    for match in re.finditer(r"\b(\d{1,2})/(\d{1,2})(?:/(\d{2,4}))?\b", message, re.IGNORECASE):
+    for match in re.finditer(r"\b(\d{1,2})[/.](\d{1,2})(?:[/.](\d{2,4}))?\b", message, re.IGNORECASE):
         day = int(match.group(1))
         month = int(match.group(2))
         year = match.group(3)
@@ -169,6 +189,29 @@ def _extract_explicit_dates(message, base_date):
         if value not in seen:
             seen.add(value)
             dates.append(value)
+
+    for match in re.finditer(
+        r"\b(\d{1,2}(?:\s*(?:&|,|and)\s*\d{1,2})+)\s+"
+        r"(jan|january|feb|february|mar|march|apr|april|may|jun|june|jul|july|aug|august|sep|sept|september|oct|october|nov|november|dec|december)"
+        r"(?:\s+(\d{2,4}))?\b",
+        message,
+        re.IGNORECASE,
+    ):
+        day_block = match.group(1)
+        month = MONTH_MAP[match.group(2).lower()]
+        year = match.group(3)
+        year_val = base_date.year if year is None else int(year) + (2000 if len(year) == 2 else 0)
+        for day_text in re.split(r"\s*(?:&|,|and)\s*", day_block):
+            if not day_text.strip():
+                continue
+            day = int(day_text)
+            try:
+                value = date(year_val, month, day)
+            except ValueError:
+                continue
+            if value not in seen:
+                seen.add(value)
+                dates.append(value)
 
     for match in re.finditer(
         r"\b(\d{1,2})(?:st|nd|rd|th)?(?:\s+of)?\s+"
@@ -192,6 +235,26 @@ def _extract_explicit_dates(message, base_date):
     return dates
 
 
+def _extract_date_range_start(message, base_date):
+    match = re.search(
+        r"\b(\d{1,2})\s*-\s*(\d{1,2})\s+"
+        r"(jan|january|feb|february|mar|march|apr|april|may|jun|june|jul|july|aug|august|sep|sept|september|oct|october|nov|november|dec|december)"
+        r"(?:\s+(\d{2,4}))?\b",
+        message,
+        re.IGNORECASE,
+    )
+    if not match:
+        return None
+    day = int(match.group(1))
+    month = MONTH_MAP[match.group(3).lower()]
+    year = match.group(4)
+    year_val = base_date.year if year is None else int(year) + (2000 if len(year) == 2 else 0)
+    try:
+        return date(year_val, month, day)
+    except ValueError:
+        return None
+
+
 def _is_reschedule_message(lower):
     return any(hint in lower for hint in RESCHEDULE_HINTS)
 
@@ -211,7 +274,16 @@ def infer_due_date(message, timestamp_iso):
 
     explicit_dates = _extract_explicit_dates(message, base_date)
     if explicit_dates:
-        if _is_reschedule_message(lower):
+        if (
+            _is_reschedule_message(lower)
+            or "instead of" in lower
+            or "turn into" in lower
+            or "changed from" in lower
+            or "change from" in lower
+            or "replace with" in lower
+            or "replaced with" in lower
+            or ("from" in lower and "to" in lower and len(explicit_dates) >= 2)
+        ):
             return max(explicit_dates)
         return explicit_dates[0]
 
@@ -247,6 +319,8 @@ def infer_task_name(group_name, message):
         return "Lab Test"
     if "final test" in lower:
         return "Final Test"
+    if "exam" in lower:
+        return "Exam"
     if "quiz" in lower:
         return "Quiz"
     if "sql exercise" in lower:
@@ -256,12 +330,85 @@ def infer_task_name(group_name, message):
     if "project brief" in lower and "project orion" in lower:
         return "Project Orion"
 
+    lines = [re.sub(r"\s+", " ", line).strip(" -:\t") for line in message.strip().splitlines() if line.strip()]
+    for line in lines:
+        normalized = line.lower()
+        if any(normalized.startswith(prefix) for prefix in GENERIC_OPENERS):
+            continue
+        return line[:90]
     first_line = re.sub(r"\s+", " ", message.strip().splitlines()[0])
     return first_line[:90]
 
 
-def should_create_deadline(group_name, message, due):
-    if due is None or due < date.today():
+def _normalize_message_for_matching(message):
+    return (
+        (message or "")
+        .replace("\u2013", "-")
+        .replace("\u2014", "-")
+        .replace("\u2212", "-")
+    )
+
+
+def _extract_structured_deadlines(group_name, message, timestamp_iso):
+    base_date = parse_message_timestamp(timestamp_iso)
+    normalized = _normalize_message_for_matching(message)
+    entries = []
+    seen = set()
+
+    def _add_entry(task, due_date):
+        if not task or not due_date:
+            return
+        key = (task, due_date.isoformat())
+        if key in seen:
+            return
+        seen.add(key)
+        entries.append((task, due_date))
+
+    if re.search(r"project progress", normalized, re.IGNORECASE) and re.search(r"task\s*no\.?\s*7", normalized, re.IGNORECASE):
+        match = re.search(
+            r"submission\s+deadline\s*:\s*([^\n]+)",
+            normalized,
+            re.IGNORECASE,
+        )
+        if match:
+            due = infer_due_date(match.group(1), timestamp_iso)
+            _add_entry("Project Progress Submission - Task 7", due)
+
+    if re.search(r"\bproject presentation\b", normalized, re.IGNORECASE):
+        block = re.search(
+            r"project presentation\s*(.*?)(?:\n\s*\n|final assessment|$)",
+            normalized,
+            re.IGNORECASE | re.DOTALL,
+        )
+        if block:
+            range_start = _extract_date_range_start(block.group(1), base_date)
+            if range_start:
+                _add_entry("Project Presentation", range_start)
+            else:
+                dates = _extract_explicit_dates(block.group(1), base_date)
+                if dates:
+                    _add_entry("Project Presentation", min(dates))
+
+    final_match = re.search(
+        r"final assessment(?:\s*\(tentative\))?.{0,250}?date\s*:\s*([^\n]+)",
+        normalized,
+        re.IGNORECASE | re.DOTALL,
+    )
+    if final_match:
+        due = infer_due_date(final_match.group(1), timestamp_iso)
+        _add_entry("Final Assessment", due)
+
+    if "school visit" in normalized.lower():
+        due = infer_due_date(normalized, timestamp_iso)
+        _add_entry("School visit activity", due)
+
+    return entries
+
+
+def should_create_deadline(group_name, message, due, reference_date=None):
+    if reference_date is None:
+        reference_date = date.today()
+    if due is None or due < reference_date:
         return False
     lower = message.lower()
     group_lower = (group_name or "").lower()
@@ -278,6 +425,17 @@ def should_create_deadline(group_name, message, due):
         "proposal", "video", "progress", "resume", "cover letter", "interview",
     )):
         return False
+    if "class" in lower and "online" in lower and not any(word in lower for word in STRONG_ACTION_HINTS):
+        return False
+    if (
+        "lecture" in lower
+        and not any(word in lower for word in STRONG_ACTION_HINTS)
+        and not any(word in lower for word in ("final", "midterm", "venue", "room", "details"))
+        and "briefing" not in lower
+    ):
+        return False
+    if any(lower.startswith(prefix) for prefix in GENERIC_OPENERS) and not any(word in lower for word in STRONG_ACTION_HINTS):
+        return False
     if not any(hint in lower for hint in ACADEMIC_HINTS):
         if not any(hint in (group_name or "").lower() for hint in ("project proposal pe group", "logistic pe")):
             return False
@@ -292,15 +450,27 @@ def sync_message(group_name, message, timestamp_iso):
         return []
 
     lower = message.lower()
-    explicit_dates = _extract_explicit_dates(message, parse_message_timestamp(timestamp_iso))
+    base_date = parse_message_timestamp(timestamp_iso)
+    explicit_dates = _extract_explicit_dates(message, base_date)
     if _is_cancel_only_message(lower, explicit_dates):
         task = infer_task_name(group_name, message)
         removed_ids = cancel(task, course, due=explicit_dates[0].strftime("%d %b %Y") if explicit_dates else None)
         return [(row_id, "canceled", course, task, "") for row_id in removed_ids]
 
+    structured = _extract_structured_deadlines(group_name, message, timestamp_iso)
+    if structured:
+        created = []
+        for task, due in structured:
+            if not should_create_deadline(group_name, task, due, reference_date=base_date):
+                continue
+            row_id, status = add(task, course, due.strftime("%d %b %Y"), source="whatsapp")
+            created.append((row_id, status, course, task, due.strftime("%d %b %Y")))
+        if created:
+            return created
+
     source = "whatsapp-reschedule" if _is_reschedule_message(lower) else "whatsapp"
     due = infer_due_date(message, timestamp_iso)
-    if not should_create_deadline(group_name, message, due):
+    if not should_create_deadline(group_name, message, due, reference_date=base_date):
         return []
 
     task = infer_task_name(group_name, message)
