@@ -41,5 +41,11 @@
     "timestamp_iso": "2026-06-07T10:00:00",
     "message": "Exam 9 & 10 June 2026",
     "expected_due": "2026-06-09"
+  },
+  "oop_exam_detail_block": {
+    "group_name": "OOP Group A1",
+    "timestamp_iso": "2026-06-07T10:00:00",
+    "message": "Monday, June 8, 2026.\n\nDetails:\n\nTime: 2:30 PM\nDuration: 1 hour 30 minutes\nPlace: lab\nFormat: 65 questions, 80 marks",
+    "expected_due": "2026-06-08"
   }
 }

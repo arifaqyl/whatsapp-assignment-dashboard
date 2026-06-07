@@ -106,6 +106,18 @@ STRONG_ACTION_HINTS = (
 )
 
 
+def _looks_like_exam_notice(group_name, message):
+    lower = (message or "").lower()
+    group_lower = (group_name or "").lower()
+    if "exam" in lower or "examination" in lower:
+        return True
+    if "oop" not in group_lower and "oosad" not in group_lower:
+        return False
+    has_date = bool(_extract_explicit_dates(message, parse_message_timestamp("2026-06-07T00:00:00")))
+    has_details_block = any(token in lower for token in ("time:", "duration:", "place:", "venue:", "format:", "details"))
+    return has_date and has_details_block
+
+
 def infer_course(group_name):
     lower = (group_name or "").lower()
     for needle, course in ACADEMIC_GROUP_TO_COURSE:
@@ -157,6 +169,27 @@ def _parse_explicit_text_date(message, base_date):
         return None
 
 
+def _parse_weekday_prefixed_date(message, base_date):
+    match = re.search(
+        r"\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|"
+        r"isnin|selasa|rabu|khamis|jumaat|sabtu|ahad)\s*,?\s*"
+        r"(jan|january|feb|february|mar|march|apr|april|may|jun|june|jul|july|aug|august|sep|sept|september|oct|october|nov|november|dec|december)\s+"
+        r"(\d{1,2})(?:st|nd|rd|th)?(?:,\s*(\d{2,4}))?\b",
+        message,
+        re.IGNORECASE,
+    )
+    if not match:
+        return None
+    month = MONTH_MAP[match.group(1).lower()]
+    day = int(match.group(2))
+    year = match.group(3)
+    year_val = base_date.year if year is None else int(year) + (2000 if len(year) == 2 else 0)
+    try:
+        return date(year_val, month, day)
+    except ValueError:
+        return None
+
+
 def _parse_weekday(message, base_date):
     lower = message.lower()
     for name, idx in WEEKDAY_INDEX.items():
@@ -189,6 +222,11 @@ def _extract_explicit_dates(message, base_date):
         if value not in seen:
             seen.add(value)
             dates.append(value)
+
+    weekday_prefixed = _parse_weekday_prefixed_date(message, base_date)
+    if weekday_prefixed and weekday_prefixed not in seen:
+        seen.add(weekday_prefixed)
+        dates.append(weekday_prefixed)
 
     for match in re.finditer(
         r"\b(\d{1,2}(?:\s*(?:&|,|and)\s*\d{1,2})+)\s+"
@@ -319,7 +357,7 @@ def infer_task_name(group_name, message):
         return "Lab Test"
     if "final test" in lower:
         return "Final Test"
-    if "exam" in lower:
+    if _looks_like_exam_notice(group_name, message):
         return "Exam"
     if "quiz" in lower:
         return "Quiz"

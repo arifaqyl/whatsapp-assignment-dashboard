@@ -311,7 +311,7 @@ def _summarize_wa_message(message, limit=96):
             final_bits.append(final_assessment.group(2).strip().rstrip('.,;'))
         parts.append("Final " + " ".join(final_bits))
 
-    if "exam" in lower and not any(part.lower().startswith("exam ") for part in parts):
+    if ("exam" in lower or (("time" in lower or "duration" in lower or "venue" in lower or "place" in lower or "format" in lower) and "details" in lower)) and not any(part.lower().startswith("exam ") for part in parts):
         exam_bits = []
         date_match = re.search(
             r"\b(\d{1,2}[./]\d{1,2}(?:[./]\d{2,4})?|\d{1,2}\s+[a-z]+\s+\d{4})\b",
@@ -320,19 +320,31 @@ def _summarize_wa_message(message, limit=96):
         )
         if date_match:
             exam_bits.append(date_match.group(1).strip().rstrip('.,;'))
-        time_match = re.search(
-            r"\b(\d{1,2}(?::|\.)\d{2}\s*(?:am|pm)?\s*-\s*\d{1,2}(?::|\.)\d{2}\s*(?:am|pm)?)\b",
-            text,
-            re.IGNORECASE,
+        time_match = (
+            re.search(r"(?im)^\s*time\s*:\s*(.+)$", message or "")
+            or re.search(
+                r"\b(\d{1,2}(?::|\.)\d{2}\s*(?:am|pm)?\s*-\s*\d{1,2}(?::|\.)\d{2}\s*(?:am|pm)?)\b",
+                text,
+                re.IGNORECASE,
+            )
         )
-        duration_match = re.search(r"\bduration\s*:\s*([^\n,]+)", text, re.IGNORECASE)
-        place_match = re.search(r"\b(?:place|venue)\s*:?\s*([^\n,]+)", text, re.IGNORECASE)
+        duration_match = re.search(r"(?im)^\s*duration\s*:\s*(.+)$", message or "")
+        place_match = (
+            re.search(r"(?im)^\s*(?:place|venue)\s*:\s*(.+)$", message or "")
+            or re.search(r"\b(?:place|venue)\s*:?\s*([^,]+)", text, re.IGNORECASE)
+        )
+        format_match = (
+            re.search(r"(?im)^\s*format\s*:\s*(.+)$", message or "")
+            or re.search(r"\bformat\s*:?\s*([^,]+)", text, re.IGNORECASE)
+        )
         if time_match:
             exam_bits.append(f"Time {time_match.group(1).strip().rstrip('.,;')}")
         if duration_match:
             exam_bits.append(f"Duration {duration_match.group(1).strip().rstrip('.,;')}")
         if place_match:
             exam_bits.append(f"Place {place_match.group(1).strip().rstrip('.,;')}")
+        if format_match:
+            exam_bits.append(f"Format {format_match.group(1).strip().rstrip('.,;')}")
         if exam_bits:
             parts.append("Exam " + " | ".join(exam_bits))
         else:

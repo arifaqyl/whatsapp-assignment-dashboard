@@ -102,6 +102,11 @@ class WhatsappDeadlineTests(unittest.TestCase):
         inferred = infer_due_date(case["message"], case["timestamp_iso"])
         self.assertEqual(inferred, date(2026, 6, 9))
 
+    def test_infer_due_date_handles_oop_detail_block(self):
+        case = FIXTURES["oop_exam_detail_block"]
+        inferred = infer_due_date(case["message"], case["timestamp_iso"])
+        self.assertEqual(inferred, date(2026, 6, 8))
+
     def test_should_create_deadline_rejects_noise(self):
         self.assertFalse(
             should_create_deadline(
@@ -126,6 +131,15 @@ class WhatsappDeadlineTests(unittest.TestCase):
                 "OOSAD March 2026 MIIT",
                 "Pls take note Group B01, exam on 9.6.2026, 1.00-2.15, venue 1807 ya",
                 date(2026, 6, 9),
+            )
+        )
+
+    def test_should_create_deadline_accepts_oop_detail_block(self):
+        self.assertTrue(
+            should_create_deadline(
+                "OOP Group A1",
+                "Monday, June 8, 2026.\n\nDetails:\n\nTime: 2:30 PM\nDuration: 1 hour 30 minutes\nPlace: lab\nFormat: 65 questions, 80 marks",
+                date(2026, 6, 8),
             )
         )
 
@@ -357,6 +371,18 @@ class DashboardDedupTests(unittest.TestCase):
         self.assertIn("Exam", summary)
         self.assertIn("Time 1.00-2.15", summary)
         self.assertIn("Place 1807", summary)
+
+    def test_wa_summary_helpers_capture_oop_detail_block(self):
+        message = (
+            "Monday, June 8, 2026.\n\nDetails:\n\nTime: 2:30 PM\nDuration: 1 hour 30 minutes\n"
+            "Place: lab\nFormat: 65 questions, 80 marks"
+        )
+        summary = gemini_dashboard._summarize_wa_message(message, limit=200)
+        self.assertIn("Exam", summary)
+        self.assertIn("Time 2:30 PM", summary)
+        self.assertIn("Duration 1 hour 30 minutes", summary)
+        self.assertIn("Place lab", summary)
+        self.assertIn("Format 65 questions", summary)
 
 
 class VleScraperHeuristicsTests(unittest.TestCase):
