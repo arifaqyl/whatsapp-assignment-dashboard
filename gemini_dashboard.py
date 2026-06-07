@@ -315,7 +315,7 @@ def _summarize_wa_message(message, limit=96):
         exam_bits = []
         exam_summary = None
         exam_list_match = re.search(
-            r"\bexam\b.*?\b(\d{1,2}(?:\s*(?:&|,|and)\s*\d{1,2})+)\s+"
+            r"\bexam\b.*?(?:on\s+)?\b(\d{1,2}(?:\s*(?:&|,|and)\s*\d{1,2})+)\s+"
             r"(jan|january|feb|february|mar|march|apr|april|may|jun|june|jul|july|aug|august|sep|sept|september|oct|october|nov|november|dec|december)"
             r"(?:\s+(\d{4}))?",
             text,
@@ -371,6 +371,21 @@ def _summarize_wa_message(message, limit=96):
             exam_line = re.search(r"\bexam\b[^\n]*", text, re.IGNORECASE)
             if exam_line:
                 parts.append(exam_line.group(0).strip().rstrip('.,;').capitalize())
+
+    if not any(part.lower().startswith("exam ") for part in parts):
+        date_list_match = re.search(
+            r"\b(\d{1,2}(?:\s*(?:&|,|and)\s*\d{1,2})+)\s+"
+            r"(jan|january|feb|february|mar|march|apr|april|may|jun|june|jul|july|aug|august|sep|sept|september|oct|october|nov|november|dec|december)"
+            r"(?:\s+(\d{4}))?",
+            text,
+            re.IGNORECASE,
+        )
+        if date_list_match:
+            day_block = re.sub(r"\s*(?:,|and)\s*", " & ", date_list_match.group(1)).strip()
+            day_block = re.sub(r"\s*&\s*", " & ", day_block)
+            month = date_list_match.group(2).title()
+            year = date_list_match.group(3)
+            parts.insert(0, f"Exam {day_block} {month}" + (f" {year}" if year else ""))
 
     if parts:
         summary = " | ".join(parts)
