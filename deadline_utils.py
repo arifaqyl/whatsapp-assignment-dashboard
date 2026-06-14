@@ -29,7 +29,11 @@ def parse_due_date(due_str):
 
     s = due_str.strip()
     for pattern in (
+        r"((?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),?\s+[A-Za-z]{3,9}\s+\d{1,2},?\s+\d{2,4})",
         r"(\d{1,2}\s+[A-Za-z]{3,9}\s+\d{2,4})",
+        r"([A-Za-z]{3,9}\s+\d{1,2},?\s+\d{2,4})",
+        r"(\d{1,2}\.\d{1,2}\.\d{2,4})",
+        r"(\d{1,2}-\d{1,2}-\d{2,4})",
         r"(\d{1,2}/\d{1,2}/\d{2,4})",
         r"(\d{4}-\d{2}-\d{2})",
     ):
@@ -38,7 +42,27 @@ def parse_due_date(due_str):
             s = match.group(1)
             break
 
-    for fmt in ("%d %b %Y", "%d %B %Y", "%d %b %y", "%d %B %y", "%d/%m/%y", "%d/%m/%Y", "%Y-%m-%d"):
+    for fmt in (
+        "%A, %B %d, %Y",
+        "%A %B %d, %Y",
+        "%A, %B %d %Y",
+        "%A %B %d %Y",
+        "%d %b %Y",
+        "%d %B %Y",
+        "%d %b %y",
+        "%d %B %y",
+        "%b %d, %Y",
+        "%B %d, %Y",
+        "%b %d %Y",
+        "%B %d %Y",
+        "%d.%m.%y",
+        "%d.%m.%Y",
+        "%d-%m-%y",
+        "%d-%m-%Y",
+        "%d/%m/%y",
+        "%d/%m/%Y",
+        "%Y-%m-%d",
+    ):
         try:
             return datetime.strptime(s, fmt).date()
         except ValueError:

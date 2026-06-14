@@ -10,5 +10,6 @@ AGENTS.md
 CLAUDE.md
 RESUME_PROMPT.md
 .claude/
+.agents/
 STUDENT_BOT_PROJECT.md
 .aider*

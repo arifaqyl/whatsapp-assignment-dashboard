@@ -1,0 +1,101 @@
+{% extends "layout.html" %}
+{% block body %}
+  <div class="hero">
+    <h2>System Health</h2>
+    <p class="muted">Current service freshness, recent operator/system actions, and backlog counters.</p>
+    <div class="chips">
+      <span class="chip">critical={{ severity_totals.critical }}</span>
+      <span class="chip">warn={{ severity_totals.warn }}</span>
+      <span class="chip">ok={{ severity_totals.ok }}</span>
+    </div>
+  </div>
+
+  <div class="grid two">
+    <section class="panel">
+      <h3>Backlog</h3>
+      <div class="chips">
+        <span class="chip">pending deadlines: {{ deadlines_count }}</span>
+        <span class="chip">recent pending messages: {{ pending_messages }}</span>
+        <span class="chip">older pending messages: {{ old_pending_messages }}</span>
+        <a class="chip" href="{{ url_for('ops.queue_page', queue_status='pending') }}">pending queue items: {{ pending_queue_items }}</a>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h3>Attention</h3>
+      {% if unhealthy_components or attention_counts %}
+        <div class="chips">
+          {% for row in unhealthy_components %}
+            <span class="chip">{{ row.component }}={{ row.severity }}</span>
+          {% endfor %}
+          {% for row in attention_counts %}
+            <a class="chip" href="{{ url_for('ops.queue_page', queue_status='pending', source=row.source_type, reason=row.reason_code, page=1, page_size=10) }}">{{ row.source_type }} / {{ row.reason_code }}: {{ row.count }}</a>
+          {% endfor %}
+        </div>
+      {% else %}
+        <div class="empty">No current health or queue hotspots.</div>
+      {% endif %}
+    </section>
+
+    <section class="panel">
+      <h3>Components</h3>
+      {% if health_rows %}
+        <table>
+          <thead>
+            <tr>
+              <th>Component</th>
+              <th>Status</th>
+              <th>Last success</th>
+              <th>Last failure</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in health_rows %}
+              <tr>
+                <td>{{ row.component }}</td>
+                <td>{{ row.last_status }} / {{ row.severity }}<div class="muted">{{ row.updated_age }}</div></td>
+                <td>{{ row.success_age }}</td>
+                <td>{% if row.last_failure_at %}{{ row.failure_age }}{% else %}never{% endif %}</td>
+              </tr>
+              {% if row.details %}
+                <tr>
+                  <td colspan="4"><div class="preview">{{ row.details }}</div></td>
+                </tr>
+              {% endif %}
+            {% endfor %}
+          </tbody>
+        </table>
+      {% else %}
+        <div class="empty">No health snapshots yet.</div>
+      {% endif %}
+    </section>
+  </div>
+
+  <section class="panel" style="margin-top: 18px;">
+    <h3>Recent Actions</h3>
+    {% if recent_actions %}
+      <table>
+        <thead>
+          <tr>
+            <th>When</th>
+            <th>Action</th>
+            <th>Target</th>
+            <th>Actor</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in recent_actions %}
+            <tr>
+              <td>{{ row.created_age }}</td>
+              <td>{{ row.action_type }}</td>
+              <td><a href="{{ url_for('ops.queue_item_page', queue_item_id=row.queue_item_id) }}">#{{ row.queue_item_id }}</a></td>
+              <td>{{ row.actor }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    {% else %}
+      <div class="empty">No operator or system actions recorded yet.</div>
+    {% endif %}
+  </section>
+{% endblock %}

@@ -11,6 +11,7 @@ from datetime import datetime
 from urllib.parse import unquote, urlparse
 from playwright.sync_api import sync_playwright
 import config as app_config
+import db as ops_db
 from config import BOT_TOKEN as TELEGRAM_BOT_TOKEN, CHAT_ID as TELEGRAM_CHAT_ID
 from paths import DEADLINES_DB as DEADLINES_DB_PATH, MESSAGES_DB as MESSAGES_DB_PATH, SESSION_FILE as SESSION_FILE_PATH
 from deadline_utils import (
@@ -146,7 +147,14 @@ def get_wa_messages(limit=15):
 # ── VLE helpers ───────────────────────────────────────────────────────────────
 
 DATE_RE = re.compile(
-    r'\b(\d{1,2}[\s/\-]\w+[\s/\-]\d{2,4}|\w+\s+\d{1,2},?\s+\d{4}|\d{1,2}/\d{1,2}/\d{2,4})\b'
+    r'\b('
+    r'(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),?\s+[A-Za-z]{3,10}\s+\d{1,2},?\s+\d{4}'
+    r'|\d{1,2}[\s/\-]\w+[\s/\-]\d{2,4}'
+    r'|\w+\s+\d{1,2},?\s+\d{4}(?:\s+\d{1,2}:\d{2}\s*(?:AM|PM))?'
+    r'|\d{1,2}/\d{1,2}/\d{2,4}'
+    r'|\d{1,2}\.\d{1,2}\.\d{2,4}'
+    r')\b',
+    re.IGNORECASE,
 )
 DEADLINE_CONTEXT_RE = re.compile(
     r'(?:due|deadline|submit(?:ted)?|submission)\s*[:\-–]?\s*(.{0,80})',
@@ -163,6 +171,16 @@ RESOURCE_NOISE_RE = re.compile(
     r'^(announcement|notice|welcome|news|forum|lecture|slide|chapter|week|topic|template|sample|exercise|'
     r'tutorial|note|reading|handout|material|reference|rubric|syllabus|coursework|solution|answers?|recording|'
     r'calendar|guide|introduction|overview|slides?)\b',
+    re.IGNORECASE
+)
+
+PAGE_TEXT_TASK_RE = re.compile(
+    r'\b(?:assignment(?:\s+\d+)?|project(?:\s+group)?|quiz(?:\s+\d+)?|test(?:\s+\d+)?|'
+    r'exam|proposal|presentation|final\s+project|final\s+exam|report)\b',
+    re.IGNORECASE
+)
+PAGE_TEXT_PROSE_PREFIX_RE = re.compile(
+    r'^(?:please|dear|this|that|these|those|you|your|students|student|kindly|for\s+all|all\s+students)\b',
     re.IGNORECASE
 )
 
@@ -199,6 +217,132 @@ def _is_low_signal_resource(text):
 
 def _skip(reason, task_name):
     print(f"    ~ skip {reason}: {task_name[:80]}")
+
+
+def _clean_page_text_task(task_name):
+    task_name = html.unescape(task_name or "")
+    task_name = re.sub(r'\s+', ' ', task_name).strip(" -:\t")
+    task_name = re.sub(r'^(?:assessment|task)\s*[:\-]\s*', '', task_name, flags=re.IGNORECASE)
+    return task_name[:80]
+
+
+def _purge_manual_placeholder_rows(conn, course_name):
+    rows = conn.execute(
+        "SELECT id, task, due FROM deadlines WHERE course = ? AND status != 'Done' AND source = 'manual'",
+        (course_name,),
+    ).fetchall()
+    removed = 0
+    for row_id, task, due in rows:
+        lower_task = (task or "").lower()
+        lower_due = (due or "").lower()
+        if "check vle" not in lower_task and "see vle" not in lower_task and "check vle" not in lower_due:
+            continue
+        conn.execute("DELETE FROM deadlines WHERE id = ?", (row_id,))
+        removed += 1
+    if removed:
+        conn.commit()
+        print(f"  Purged {removed} manual placeholder row(s) for {course_name}")
+    return removed
+
+
+def _extract_page_text_deadlines(body_text):
+    if not body_text:
+        return []
+
+    found = []
+    seen = set()
+    lines = [re.sub(r'\s+', ' ', (line or "")).strip() for line in body_text.splitlines()]
+    lines = [line for line in lines if line]
+
+    patterns = [
+        (
+            re.compile(
+                r'(?ims)(?:^|\n)\s*([^\n]{0,80}?\b(?:Final Project|Project Group|Group Project|Assignment(?:\s+\d+)?|'
+                r'Quiz(?:\s+\d+)?|Test(?:\s+\d+)?|Proposal|Presentation|Exam)\b[^\n]{0,20})[^\n]*\n?.{0,800}?'
+                r'(?:deadline(?:\s+for\s+submission)?|due|submission\s+deadline|date)\s*[:\-]?\s*'
+                r'([A-Za-z]+\s+\d{1,2},\s*\d{4}[^.\n]*|\d{1,2}/\d{1,2}/\d{2,4}[^.\n]*|\d{1,2}\s+[A-Za-z]{3,10}\s+\d{4}[^.\n]*)'
+            ),
+            lambda m: m.group(1),
+            lambda m: m.group(2),
+        ),
+    ]
+
+    for pattern, task_getter, due_getter in patterns:
+        for match in pattern.finditer(body_text):
+            task_name = _clean_page_text_task(task_getter(match))
+            due = due_getter(match).strip()
+            if not task_name or not DATE_RE.search(due):
+                continue
+            key = (task_name.lower(), due)
+            if key in seen:
+                continue
+            seen.add(key)
+            found.append((task_name, due[:80]))
+
+    for idx, line in enumerate(lines):
+        if len(line) < 4 or len(line) > 120:
+            continue
+        if not PAGE_TEXT_TASK_RE.search(line):
+            continue
+        if PAGE_TEXT_PROSE_PREFIX_RE.search(line):
+            continue
+        if _is_low_signal_resource(line):
+            continue
+
+        task_name = _clean_page_text_task(line)
+        due = None
+        for neighbor in lines[idx: min(idx + 6, len(lines))]:
+            if neighbor == line:
+                continue
+            if re.search(r'\b(?:deadline|due|submission|date)\b', neighbor, re.IGNORECASE):
+                due_match = DATE_RE.search(neighbor)
+                if due_match:
+                    due = due_match.group(0)
+                    break
+            if not due:
+                due_match = DATE_RE.search(neighbor)
+                if due_match and len(neighbor) <= 80:
+                    due = due_match.group(0)
+                    break
+        if not due:
+            continue
+        key = (task_name.lower(), due)
+        if key in seen:
+            continue
+        seen.add(key)
+        found.append((task_name, due[:80]))
+
+    deduped = []
+    for task_name, due in found:
+        skip = False
+        for idx, (existing_task, existing_due) in enumerate(deduped):
+            if due != existing_due:
+                same_task = task_name.lower() == existing_task.lower()
+                if same_task and (due in existing_due or existing_due in due):
+                    if len(due) > len(existing_due):
+                        deduped[idx] = (existing_task, due)
+                    skip = True
+                    break
+                continue
+            low_task = task_name.lower()
+            low_existing = existing_task.lower()
+            if low_task == low_existing:
+                if len(due) > len(existing_due):
+                    deduped[idx] = (existing_task, due)
+                skip = True
+                break
+            if low_task in low_existing:
+                skip = True
+                break
+        if not skip:
+            deduped = [
+                (existing_task, existing_due)
+                for existing_task, existing_due in deduped
+                if not (existing_due == due and existing_task.lower() in task_name.lower())
+            ]
+            deduped.append((task_name, due))
+
+    return deduped
 
 
 def _extract_text_from_file(data, filename=''):
@@ -472,8 +616,8 @@ def scrape_assignment_page(page, url):
             els = page.query_selector_all(sel)
             for el in els:
                 txt = el.inner_text().strip()
-                if re.search(r'\d{1,2}\s+\w+\s+\d{4}|\d{1,2}/\d{1,2}/\d{2,4}', txt):
-                    return txt[:60]
+                if DATE_RE.search(txt):
+                    return txt[:80]
 
         # Try table rows looking for "due date"
         rows = page.query_selector_all('tr')
@@ -481,7 +625,7 @@ def scrape_assignment_page(page, url):
             txt = row.inner_text().lower()
             if 'due' in txt:
                 val = row.inner_text().strip()
-                if re.search(r'\d{1,2}\s+\w+\s+\d{4}', val):
+                if DATE_RE.search(val):
                     return val[:80]
 
         # Fallback: scan the entire body text line-by-line for a due date statement
@@ -493,11 +637,43 @@ def scrape_assignment_page(page, url):
             line_lower = line_clean.lower()
             if 'due' in line_lower:
                 # Look for date pattern in the same line (e.g. "Due: Sunday, 14 June 2026, 11:59 PM")
-                if re.search(r'\d{1,2}\s+[A-Za-z]{3,10}\s+\d{4}|\d{1,2}/\d{1,2}/\d{2,4}', line_clean):
+                if DATE_RE.search(line_clean):
                     return line_clean[:80]
     except Exception as e:
         print(f"    assignment page error: {e}")
     return "See VLE"
+
+
+def retry_due_lookup(resource_url, task_name=""):
+    """Best-effort due-date retry for a saved VLE activity/resource URL."""
+    due = _resource_hints(task_name, resource_url)
+    if due:
+        return due[:80]
+    if not resource_url or not os.path.exists(SESSION_FILE):
+        return None
+
+    browser = None
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True, args=['--no-sandbox', '--disable-dev-shm-usage'])
+            ctx = browser.new_context(storage_state=SESSION_FILE)
+            page = ctx.new_page()
+            if "/mod/assign/" in resource_url or "/mod/quiz/" in resource_url:
+                due = scrape_assignment_page(page, resource_url)
+                if due == "See VLE":
+                    due = None
+            else:
+                due = read_pdf_deadline(page, resource_url)
+            return due[:80] if due else None
+    except Exception as e:
+        print(f"    ! retry due lookup error: {e}")
+        return None
+    finally:
+        if browser:
+            try:
+                browser.close()
+            except Exception:
+                pass
 
 
 def scrape_course(page, course_url, course_code, conn):
@@ -600,30 +776,7 @@ def scrape_course(page, course_url, course_code, conn):
     # ── Step 1b: scan raw page text for deadline blocks not exposed as activity cards ──
     try:
         body_text = page.locator("body").inner_text()
-        extra_deadlines = []
-
-        patterns = [
-            (
-                re.compile(
-                    r'(?is)\bFinal Project\b.{0,800}?Deadline for submission:\s*([A-Za-z]+\s+\d{1,2},\s*\d{4}[^.\n]*)'
-                ),
-                "Final Project",
-            ),
-            (
-                re.compile(
-                    r'(?is)\bProject Group\b.{0,800}?(?:due|deadline)[^\n:]*[: ]\s*([A-Za-z]+\s+\d{1,2},\s*\d{4}[^.\n]*|\d{1,2}/\d{1,2}/\d{2,4}[^.\n]*)'
-                ),
-                "Project Group",
-            ),
-        ]
-
-        for pattern, task_label in patterns:
-            for match in pattern.finditer(body_text):
-                due = match.group(1).strip()
-                if DATE_RE.search(due):
-                    extra_deadlines.append((task_label, due))
-
-        for task_name, due in extra_deadlines:
+        for task_name, due in _extract_page_text_deadlines(body_text):
             source = f'vle-{course_name.lower()}'
             if add_if_new(conn, task_name, course_name, due[:80], source):
                 added.append((task_name, course_code, due[:80]))
@@ -722,11 +875,28 @@ def scrape_course(page, course_url, course_code, conn):
 
             # Avoid adding plain resource titles with no actual date.
             if modtype in ('resource', 'page', 'url') and not due and not is_clp:
+                if is_keyword_match:
+                    ops_db.enqueue_evidence_item(
+                        source_type="vle",
+                        course=course_name,
+                        title=task_name,
+                        message=href,
+                        reason_code="missing_due",
+                        evidence_preview=resource_blob[:400],
+                    )
                 _skip("undated resource", task_name)
                 continue
 
             # For assign/quiz, keep undated items only if they look explicitly actionable.
             if modtype in ('assign', 'quiz') and not due and not EXPLICIT_TASK_RE.search(task_name):
+                ops_db.enqueue_evidence_item(
+                    source_type="vle",
+                    course=course_name,
+                    title=task_name,
+                    message=href,
+                    reason_code="weak_due_signal",
+                    evidence_preview=resource_blob[:400],
+                )
                 _skip("weak undated activity", task_name)
                 continue
 
@@ -764,6 +934,9 @@ def scrape_course(page, course_url, course_code, conn):
             except Exception as e:
                 print(f"    ! fallback error for {task_name[:40]}: {e}")
 
+    if any(has_concrete_due(due) for _, _, due in added):
+        _purge_manual_placeholder_rows(conn, course_name)
+
     return added
 
 
@@ -773,9 +946,12 @@ def run():
     ts = datetime.now().strftime('%H:%M:%S')
     print(f"[{ts}] VLE Deep Scraper starting...")
     tg("🔄 <b>VLE Deep Scraper</b>\nLoading course pages...")
+    ops_db.init()
+    ops_db.record_system_health("vle_scraper", "ok", "starting")
 
     if not os.path.exists(SESSION_FILE):
         tg("❌ storageState.json not found.")
+        ops_db.record_system_health("vle_scraper", "error", "storageState.json missing")
         return
 
     conn = init_db()
@@ -794,11 +970,13 @@ def run():
 
         if "microsoftonline.com" in page.url:
             tg("⚠️ <b>Session Expired (Microsoft)</b>\nRun get_session.py locally.")
+            ops_db.record_system_health("vle_scraper", "error", "session expired via microsoftonline")
             b.close(); conn.close(); return
 
         if "login/index.php" in page.url:
             if not try_sso_refresh(page, ctx):
                 tg("⚠️ <b>Session Expired</b>\nRun get_session.py locally.")
+                ops_db.record_system_health("vle_scraper", "error", "session expired login/index.php")
                 b.close(); conn.close(); return
             page.goto(f"{VLE_BASE_URL}/my/", timeout=30000)
             page.wait_for_load_state("networkidle", timeout=15000)
@@ -863,6 +1041,11 @@ def run():
     lines.append("\n<i>/tasks — full task list  |  /summary — focused dashboard  |  /scrape — rescan now</i>")
 
     tg("\n".join(lines))
+    ops_db.record_system_health(
+        "vle_scraper",
+        "ok",
+        f"new_tasks={len(all_added)}; pending={len(pending)}; courses={len(course_map)}",
+    )
     print(f"\nDone. {len(all_added)} new, {len(pending)} total pending.")
 
 

@@ -7,6 +7,7 @@ from flask import Flask, request, jsonify
 import sqlite3, json
 from datetime import datetime
 import config as app_config
+import db as ops_db
 from paths import MESSAGES_DB
 from whatsapp_filters import is_relevant_message
 from whatsapp_deadlines import sync_message
@@ -21,6 +22,7 @@ MONITORED_GROUP_ALIASES = tuple(getattr(app_config, "WHATSAPP_MONITORED_GROUP_AL
 )))
 
 def init_db():
+    ops_db.init()
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS messages (
@@ -63,14 +65,15 @@ def save_message(group_name, sender, message, timestamp_ms=0, raw_json=None):
     ).fetchone()
     if existing:
         conn.close()
-        return False
+        return False, existing[0]
     c.execute(
         'INSERT INTO messages (timestamp,group_name,sender,message,raw_json) VALUES (?,?,?,?,?)',
         (ts_iso, group_name, sender, message, raw_json)
     )
     conn.commit()
+    row_id = c.lastrowid
     conn.close()
-    return True
+    return True, row_id
 
 
 def parse_waha_payload(payload: dict):
@@ -180,36 +183,75 @@ def webhook():
         result = parse_waha_payload(payload) or parse_old_openwa_payload(payload)
 
         if result is None:
+            ops_db.record_system_health("webhook_receiver", "ok", "ignored:not_group_or_no_body")
             return jsonify({'status': 'ignored', 'reason': 'not_group_or_no_body'}), 200
 
         is_group, group_name, sender, body, timestamp_ms = result
 
         if not is_group:
+            ops_db.record_system_health("webhook_receiver", "ok", "ignored:not_group")
             return jsonify({'status': 'ignored', 'reason': 'not_group'}), 200
 
         if not is_monitored_group(group_name):
+            ops_db.record_system_health("webhook_receiver", "ok", f"ignored:group:{group_name}")
             return jsonify({'status': 'ignored', 'reason': f'group:{group_name}'}), 200
 
-        saved = save_message(group_name, sender, body, timestamp_ms, json.dumps(payload))
+        saved, row_id = save_message(group_name, sender, body, timestamp_ms, json.dumps(payload))
         if not saved:
+            ops_db.record_system_health("webhook_receiver", "ok", "ignored:duplicate")
             return jsonify({'status': 'ignored', 'reason': 'duplicate'}), 200
 
         promoted = []
         sync_error = None
+        reason_code = None
         if is_relevant_message(group_name, body):
             try:
                 promoted = sync_message(group_name, body, ts_ms_to_iso(timestamp_ms))
+                if not promoted:
+                    reason_code = "no_deadline_created"
             except Exception as exc:
                 sync_error = str(exc)
+                reason_code = "promotion_error"
                 print(f"[SYNC ERROR] {group_name} | {sender}: {exc}", flush=True)
+        else:
+            reason_code = None
+
+        if reason_code:
+            queue_item_id, _ = ops_db.enqueue_evidence_item(
+                source_type="whatsapp",
+                source_row_id=row_id,
+                group_name=group_name,
+                course=None,
+                title=f"{sender} in {group_name}",
+                message=body,
+                reason_code=reason_code,
+                evidence_preview=body[:400],
+                proposed_task=None,
+                proposed_due=None,
+                last_error=sync_error,
+            )
+            ops_db.record_operator_action(
+                queue_item_id,
+                "queue_created",
+                actor="system",
+                action_payload=json.dumps({"reason_code": reason_code}),
+            )
         print(f"[SAVED] {datetime.now().strftime('%H:%M')} | {group_name} | {sender}: {body[:80]}", flush=True)
         result = {'status': 'saved', 'promoted': len(promoted)}
         if sync_error:
             result['sync_error'] = sync_error
+            ops_db.record_system_health("whatsapp_promotion", "error", sync_error)
+        else:
+            details = f"group={group_name}; promoted={len(promoted)}"
+            if reason_code:
+                details += f"; queued={reason_code}"
+            ops_db.record_system_health("whatsapp_promotion", "ok", details)
+        ops_db.record_system_health("webhook_receiver", "ok", f"group={group_name}; saved={saved}")
         return jsonify(result), 200
 
     except Exception as e:
         print(f"[ERROR] {e}", flush=True)
+        ops_db.record_system_health("webhook_receiver", "error", str(e))
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 

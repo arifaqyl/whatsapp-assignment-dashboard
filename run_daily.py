@@ -5,6 +5,7 @@ import sqlite3
 import requests
 from datetime import datetime, timedelta, date
 
+import db as ops_db
 from deadline_utils import is_active_due, parse_due_date
 from gemini_dashboard import deduplicate_tasks
 from config import BOT_TOKEN, CHAT_ID
@@ -246,11 +247,21 @@ def build_digest(deadlines, messages):
 
 
 def main():
-    deadlines = get_active_deadlines()
-    messages = get_recent_messages()
-    text = build_digest(deadlines, messages)
-    send_telegram(text)
-    print(f"[{datetime.utcnow()}] Sent deterministic digest.", flush=True)
+    try:
+        ops_db.init()
+        deadlines = get_active_deadlines()
+        messages = get_recent_messages()
+        text = build_digest(deadlines, messages)
+        send_telegram(text)
+        ops_db.record_system_health(
+            "daily_digest",
+            "ok",
+            f"deadlines={len(deadlines)}; messages={len(messages)}",
+        )
+        print(f"[{datetime.utcnow()}] Sent deterministic digest.", flush=True)
+    except Exception as exc:
+        ops_db.record_system_health("daily_digest", "error", str(exc))
+        raise
 
 
 if __name__ == "__main__":

@@ -8,6 +8,7 @@ from deadlines import init as init_dl, get_all as get_dl, mark_done as done_dl, 
 from config import BOT_TOKEN, CHAT_ID
 from datetime import datetime, date
 from vle_login import login_state, start_login_thread
+from get_session import probe_login_flow, probe_saved_session
 from waha_status import build_whatsapp_warning, get_session_status
 from deadline_utils import has_concrete_due
 from paths import CONFIG_FILE, ROOT, SCRAPE_LOG
@@ -438,11 +439,20 @@ def handle(update):
         
         with open(CONFIG_FILE, "r", encoding="utf-8") as f:
             lines = f.readlines()
-                
+
         new_lines = []
+        has_base_url = False
         for line in lines:
-            if not (line.strip().startswith("VLE_EMAIL") or line.strip().startswith("VLE_PASSWORD")):
-                new_lines.append(line)
+            stripped = line.strip()
+            if stripped.startswith("VLE_BASE_URL"):
+                has_base_url = True
+                new_lines.append('VLE_BASE_URL = "https://vle.unikl.edu.my"\n')
+                continue
+            if stripped.startswith("VLE_EMAIL") or stripped.startswith("VLE_PASSWORD"):
+                continue
+            new_lines.append(line)
+        if not has_base_url:
+            new_lines.append('\nVLE_BASE_URL = "https://vle.unikl.edu.my"\n')
         new_lines.append(f"\nVLE_EMAIL = {repr(email)}\n")
         new_lines.append(f"VLE_PASSWORD = {repr(password)}\n")
         
@@ -454,7 +464,17 @@ def handle(update):
     elif text == "/login":
         success = start_login_thread()
         if success:
-            pass # Thread handles initial notification
+            send(
+                "🌐 <b>VLE login started.</b>\n"
+                "I will try email/password first.\n"
+                "If <code>/vle_status</code> shows <b>needs_approval</b>, just approve it on your phone.\n"
+                "Only use <code>/code 123456</code> if <code>/vle_status</code> shows <b>needs_code</b>.\n"
+                "Use <code>/vle_status</code> to check progress."
+            )
+        else:
+            status = login_state.get("status", "unknown")
+            message = login_state.get("message", "") or "login already running"
+            send(f"⚠️ VLE login already running.\nStatus: <b>{status}</b>\n{message}")
 
     elif text.startswith("/code"):
         parts = text.split()
@@ -467,6 +487,38 @@ def handle(update):
             send("🔑 <b>Code received!</b> Submitting verification code to VLE login...")
         else:
             send("⚠️ No login session is currently waiting for a code.")
+
+    elif text == "/vle_status":
+        status = login_state.get("status", "unknown")
+        message = login_state.get("message", "") or "-"
+        error = login_state.get("error", "")
+        probe = probe_saved_session()
+        preview = probe_login_flow(max_seconds=8)
+        lines = [f"🌐 <b>VLE Login Status</b>\nStatus: <b>{status}</b>\nInfo: {message}"]
+        probe_line = f"Saved session: <b>{probe['status']}</b>"
+        if probe.get("age_minutes") is not None:
+            probe_line += f" | age {probe['age_minutes']} min"
+        lines.append(probe_line)
+        if probe.get("detail"):
+            lines.append(f"Session detail: {probe['detail']}")
+        if probe.get("final_url"):
+            lines.append(f"Landing URL: <code>{probe['final_url'][:500]}</code>")
+        lines.append(f"Login preview: <b>{preview['status']}</b>")
+        if preview.get("detail"):
+            lines.append(f"Preview detail: {preview['detail']}")
+        if preview.get("final_url"):
+            lines.append(f"Preview URL: <code>{preview['final_url'][:500]}</code>")
+        if preview.get("status") == "needs_approval":
+            lines.append("Action: approve the Microsoft sign-in on your phone. No <code>/code</code> needed yet.")
+        elif preview.get("status") == "needs_code":
+            lines.append("Action: enter the OTP you receive using <code>/code 123456</code>.")
+        elif preview.get("status") in {"needs_email", "needs_password"}:
+            lines.append("Action: bot is still before MFA. Wait a bit, then check <code>/vle_status</code> again.")
+        elif preview.get("status") == "vle_ready":
+            lines.append("Action: login flow can already reach VLE.")
+        if error:
+            lines.append(f"Error: <code>{error[:500]}</code>")
+        send("\n".join(lines))
 
     # ── DASHBOARD & DIGEST ────────────────────────────────────
 
@@ -541,6 +593,7 @@ def handle(update):
             "/stats — show counts\n"
             "/setup_vle email password — save credentials on server\n"
             "/code 123456 — enter OTP code for VLE login\n"
+            "/vle_status — inspect current VLE login state\n"
             "/qr — scan QR for WhatsApp\n"
             f"/link {WAHA_PAIR_NUMBER or 'YOUR_PHONE_NUMBER'} — pair WhatsApp"
         )

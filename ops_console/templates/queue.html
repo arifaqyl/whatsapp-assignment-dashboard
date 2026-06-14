@@ -1,0 +1,134 @@
+{% extends "layout.html" %}
+{% block body %}
+  <div class="hero">
+    <h2>Unresolved Evidence Queue</h2>
+    <p class="muted">Items here need operator eyes because parsing was ambiguous, promotion failed, or downstream sync threw an error.</p>
+    <div class="chips">
+      <a class="chip" href="{{ url_for('ops.queue_page', queue_status='pending', source=source_type, reason=reason_code, page=1, page_size=page_size) }}">pending={{ status_totals.pending }}</a>
+      <a class="chip" href="{{ url_for('ops.queue_page', queue_status='resolved', source=source_type, reason=reason_code, page=1, page_size=page_size) }}">resolved={{ status_totals.resolved }}</a>
+      <a class="chip" href="{{ url_for('ops.queue_page', queue_status='dismissed', source=source_type, reason=reason_code, page=1, page_size=page_size) }}">dismissed={{ status_totals.dismissed }}</a>
+      <a class="chip" href="{{ url_for('ops.queue_page', queue_status='all', source=source_type, reason=reason_code, page=1, page_size=page_size) }}">all={{ status_totals.all }}</a>
+    </div>
+    {% if status_message %}
+      <div class="chips" style="margin-top: 12px;">
+        <span class="chip">status={{ status_message }}</span>
+        {% if detail_message %}<span class="chip">{{ detail_message }}</span>{% endif %}
+      </div>
+    {% endif %}
+    {% if source_type or reason_code %}
+      <div class="chips">
+        {% if queue_status %}<span class="chip">status={{ queue_status }}</span>{% endif %}
+        {% if source_type %}<span class="chip">source={{ source_type }}</span>{% endif %}
+        {% if reason_code %}<span class="chip">reason={{ reason_code }}</span>{% endif %}
+      </div>
+    {% endif %}
+  </div>
+
+  <div class="grid two">
+    <section class="panel">
+      <h3>Counts</h3>
+      {% if counts %}
+        <div class="chips">
+          {% for row in counts %}
+            <a class="chip" href="{{ url_for('ops.queue_page', queue_status='pending', source=row.source_type, reason=row.reason_code, page=1, page_size=page_size) }}">{{ row.source_type }} / {{ row.reason_code }}: {{ row.count }}</a>
+          {% endfor %}
+        </div>
+      {% else %}
+        <div class="empty">No pending queue items.</div>
+      {% endif %}
+    </section>
+
+    <section class="panel">
+      <h3>Filters</h3>
+      <form method="get" action="{{ url_for('ops.queue_page') }}">
+        <div style="display: grid; gap: 8px;">
+          <input type="text" name="queue_status" value="{{ queue_status or 'pending' }}" placeholder="status pending/resolved/dismissed/all">
+          <input type="text" name="source" value="{{ source_type or '' }}" placeholder="source e.g. whatsapp">
+          <input type="text" name="reason" value="{{ reason_code or '' }}" placeholder="reason e.g. no_deadline_created">
+          <input type="number" min="1" max="100" name="page_size" value="{{ page_size }}" placeholder="page size">
+          <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+            <button type="submit">Apply</button>
+            <a href="{{ url_for('ops.queue_page') }}">Reset</a>
+          </div>
+        </div>
+      </form>
+    </section>
+  </div>
+
+  <section class="panel" style="margin-top: 18px;">
+    <h3>Queue Items</h3>
+    <p class="muted">page {{ page }} of {{ total_pages }} · {{ total_items }} matching item(s)</p>
+    {% if items %}
+      <table>
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>Type</th>
+            <th>Reason</th>
+            <th>Context</th>
+            <th>Preview</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for item in items %}
+            <tr>
+              <td><a href="{{ url_for('ops.queue_item_page', queue_item_id=item.id, queue_status=queue_status, source=source_type, reason=reason_code, page=current_page, page_size=page_size) }}">#{{ item.id }}</a><div class="muted">{{ item.updated_age }}</div></td>
+              <td>
+                <div>{{ item.source_type }}</div>
+                {% if item.course %}<div class="muted">{{ item.course }}</div>{% endif %}
+                {% if item.group_name %}<div class="muted">{{ item.group_name }}</div>{% endif %}
+              </td>
+              <td>
+                <div>{{ item.reason_code }}</div>
+                {% if item.last_error %}<div class="warn">{{ item.last_error }}</div>{% endif %}
+              </td>
+              <td>
+                {% if item.title %}<div><strong>{{ item.title }}</strong></div>{% endif %}
+                {% if item.proposed_task %}<div class="muted">task: {{ item.proposed_task }}</div>{% endif %}
+                {% if item.proposed_due %}<div class="muted">due: {{ item.proposed_due }}</div>{% endif %}
+                <div class="muted">created {{ item.created_age }}</div>
+              </td>
+              <td>
+                <div class="preview">{{ item.evidence_preview or item.message or "No preview" }}</div>
+                {% if item.status == "pending" %}
+                  <form method="post" action="{{ url_for('ops.approve_queue', queue_item_id=item.id) }}" style="margin-top: 10px;">
+                    <div style="display: grid; gap: 8px;">
+                      <input type="hidden" name="return_to" value="queue">
+                      <input type="hidden" name="queue_status" value="{{ queue_status or 'pending' }}">
+                      <input type="hidden" name="source" value="{{ source_type or '' }}">
+                      <input type="hidden" name="reason" value="{{ reason_code or '' }}">
+                      <input type="hidden" name="page" value="{{ page }}">
+                      <input type="hidden" name="page_size" value="{{ page_size }}">
+                      <input type="text" name="task" value="{{ item.proposed_task or item.title or '' }}" placeholder="Task name">
+                      <input type="text" name="course" value="{{ item.course or '' }}" placeholder="Course">
+                      <input type="text" name="due" value="{{ item.proposed_due or '' }}" placeholder="Due date e.g. 19 Jun 2026">
+                      <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+                        <button type="submit">Approve</button>
+                        <button type="submit" formaction="{{ url_for('ops.retry_queue', queue_item_id=item.id) }}">Retry</button>
+                        <button type="submit" formaction="{{ url_for('ops.dismiss_queue', queue_item_id=item.id) }}">Dismiss</button>
+                      </div>
+                    </div>
+                  </form>
+                {% else %}
+                  <div class="chips" style="margin-top: 10px;">
+                    <span class="chip">status={{ item.status }}</span>
+                  </div>
+                {% endif %}
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      <div class="chips" style="margin-top: 14px;">
+        {% if has_prev %}
+          <a class="chip" href="{{ url_for('ops.queue_page', queue_status=queue_status, source=source_type, reason=reason_code, page=page-1, page_size=page_size) }}">prev</a>
+        {% endif %}
+        {% if has_next %}
+          <a class="chip" href="{{ url_for('ops.queue_page', queue_status=queue_status, source=source_type, reason=reason_code, page=page+1, page_size=page_size) }}">next</a>
+        {% endif %}
+      </div>
+    {% else %}
+      <div class="empty">Queue empty. Intake is currently not asking for manual review.</div>
+    {% endif %}
+  </section>
+{% endblock %}

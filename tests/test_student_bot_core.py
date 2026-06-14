@@ -57,11 +57,42 @@ def _load_vle_scraper():
     return importlib.import_module("vle_scraper")
 
 
+def _load_get_session():
+    config_mod = types.ModuleType("config")
+    config_mod.VLE_BASE_URL = "https://vle.unikl.edu.my"
+    config_mod.VLE_EMAIL = "user@example.com"
+    config_mod.VLE_PASSWORD = "secret"
+    sys.modules["config"] = config_mod
+
+    if "playwright" not in sys.modules:
+        playwright_mod = types.ModuleType("playwright")
+        sync_api_mod = types.ModuleType("playwright.sync_api")
+        class DummyTimeoutError(Exception):
+            pass
+        sync_api_mod.TimeoutError = DummyTimeoutError
+        sync_api_mod.sync_playwright = lambda: None
+        playwright_mod.sync_api = sync_api_mod
+        sys.modules["playwright"] = playwright_mod
+        sys.modules["playwright.sync_api"] = sync_api_mod
+    else:
+        sync_api_mod = sys.modules["playwright.sync_api"]
+        if not hasattr(sync_api_mod, "TimeoutError"):
+            class DummyTimeoutError(Exception):
+                pass
+            sync_api_mod.TimeoutError = DummyTimeoutError
+
+    if "get_session" in sys.modules:
+        return importlib.reload(sys.modules["get_session"])
+    return importlib.import_module("get_session")
+
+
 class DeadlineUtilsTests(unittest.TestCase):
     def test_parse_due_date_variants(self):
         self.assertEqual(parse_due_date("05 Jun 2026"), date(2026, 6, 5))
         self.assertEqual(parse_due_date("5 June 2026"), date(2026, 6, 5))
         self.assertEqual(parse_due_date("05/06/26"), date(2026, 6, 5))
+        self.assertEqual(parse_due_date("9.6.2026"), date(2026, 6, 9))
+        self.assertEqual(parse_due_date("Monday, June 8, 2026"), date(2026, 6, 8))
         self.assertTrue(parse_due_date("See VLE").year >= 9999)
 
     def test_tasks_match_sensitive_to_numbers(self):
@@ -131,6 +162,7 @@ class WhatsappDeadlineTests(unittest.TestCase):
                 "OOSAD March 2026 MIIT",
                 "Pls take note Group B01, exam on 9.6.2026, 1.00-2.15, venue 1807 ya",
                 date(2026, 6, 9),
+                reference_date=date(2026, 6, 1),
             )
         )
 
@@ -140,6 +172,7 @@ class WhatsappDeadlineTests(unittest.TestCase):
                 "OOP Group A1",
                 "Monday, June 8, 2026.\n\nDetails:\n\nTime: 2:30 PM\nDuration: 1 hour 30 minutes\nPlace: lab\nFormat: 65 questions, 80 marks",
                 date(2026, 6, 8),
+                reference_date=date(2026, 6, 1),
             )
         )
 
@@ -403,6 +436,223 @@ class VleScraperHeuristicsTests(unittest.TestCase):
         self.assertFalse(vle_scraper._should_keep_clp_task("assignment", "See VLE"))
         self.assertTrue(vle_scraper._should_keep_clp_task("Assignment 4: Resume, Cover Letter & Mock Job Interview", "14 Jun 2026"))
 
+    def test_extract_page_text_deadlines_finds_deadline_block(self):
+        vle_scraper = _load_vle_scraper()
+        body_text = (
+            "Final Project\n"
+            "Please complete the report carefully.\n"
+            "Deadline for submission: June 18, 2026 10:00 AM\n"
+        )
+        self.assertEqual(
+            vle_scraper._extract_page_text_deadlines(body_text),
+            [("Final Project", "June 18, 2026 10:00 AM")],
+        )
+
+    def test_extract_page_text_deadlines_finds_task_then_nearby_date_line(self):
+        vle_scraper = _load_vle_scraper()
+        body_text = (
+            "OOSAD Exam\n"
+            "Date: 9 June 2026\n"
+            "Venue: Dewan\n"
+        )
+        self.assertEqual(
+            vle_scraper._extract_page_text_deadlines(body_text),
+            [("OOSAD Exam", "9 June 2026")],
+        )
+
+    def test_extract_page_text_deadlines_handles_dotted_numeric_dates(self):
+        vle_scraper = _load_vle_scraper()
+        body_text = (
+            "OOSAD Exam\n"
+            "Date: 9.6.2026\n"
+            "Venue: Dewan\n"
+        )
+        self.assertEqual(
+            vle_scraper._extract_page_text_deadlines(body_text),
+            [("OOSAD Exam", "9.6.2026")],
+        )
+
+    def test_purge_manual_placeholder_rows_removes_check_vle_rows(self):
+        vle_scraper = _load_vle_scraper()
+        conn = sqlite3.connect(":memory:")
+        conn.execute(
+            """
+            CREATE TABLE deadlines (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task TEXT NOT NULL,
+                course TEXT NOT NULL,
+                due TEXT NOT NULL,
+                status TEXT DEFAULT 'Pending',
+                source TEXT DEFAULT 'manual',
+                added TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO deadlines (task, course, due, source) VALUES (?,?,?,?)",
+            ("Assignments (check VLE/OOSAD)", "OOSAD", "~1 Jun 2026", "manual"),
+        )
+        conn.execute(
+            "INSERT INTO deadlines (task, course, due, source) VALUES (?,?,?,?)",
+            ("Exam", "OOSAD", "09 Jun 2026", "vle-oosad"),
+        )
+        conn.commit()
+
+        removed = vle_scraper._purge_manual_placeholder_rows(conn, "OOSAD")
+        rows = conn.execute("SELECT task, source FROM deadlines ORDER BY id").fetchall()
+        conn.close()
+
+        self.assertEqual(removed, 1)
+        self.assertEqual(rows, [("Exam", "vle-oosad")])
+
+
+class GetSessionProbeTests(unittest.TestCase):
+    def test_probe_saved_session_reports_missing_file(self):
+        get_session = _load_get_session()
+        old_exists = get_session.os.path.exists
+        try:
+            get_session.os.path.exists = lambda path: False
+            result = get_session.probe_saved_session()
+        finally:
+            get_session.os.path.exists = old_exists
+
+        self.assertEqual(result["status"], "missing")
+        self.assertFalse(result["exists"])
+        self.assertIn("missing", result["detail"])
+
+    def test_probe_saved_session_reports_expired_redirect(self):
+        get_session = _load_get_session()
+
+        class FakePage:
+            def __init__(self, url):
+                self.url = url
+
+            def goto(self, *_args, **_kwargs):
+                return None
+
+            def wait_for_load_state(self, *_args, **_kwargs):
+                return None
+
+        class FakeContext:
+            def __init__(self, url):
+                self._url = url
+
+            def new_page(self):
+                return FakePage(self._url)
+
+        class FakeBrowser:
+            def __init__(self, url):
+                self._url = url
+
+            def new_context(self, **_kwargs):
+                return FakeContext(self._url)
+
+            def close(self):
+                return None
+
+        class FakePlaywright:
+            def __init__(self, url):
+                self.chromium = types.SimpleNamespace(launch=lambda **_kwargs: FakeBrowser(url))
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+        old_exists = get_session.os.path.exists
+        old_getmtime = get_session.os.path.getmtime
+        old_time = get_session.time.time
+        old_sync = get_session.sync_playwright
+        try:
+            get_session.os.path.exists = lambda path: True
+            get_session.os.path.getmtime = lambda path: 1000
+            get_session.time.time = lambda: 1600
+            get_session.sync_playwright = lambda: FakePlaywright(
+                "https://vle.unikl.edu.my/login/index.php?loginredirect=1"
+            )
+            result = get_session.probe_saved_session()
+        finally:
+            get_session.os.path.exists = old_exists
+            get_session.os.path.getmtime = old_getmtime
+            get_session.time.time = old_time
+            get_session.sync_playwright = old_sync
+
+        self.assertEqual(result["status"], "expired")
+        self.assertEqual(result["age_minutes"], 10)
+        self.assertIn("redirects to login", result["detail"])
+
+    def test_probe_login_flow_reports_needs_code(self):
+        get_session = _load_get_session()
+
+        class FakeLocator:
+            def __init__(self, visible):
+                self._visible = visible
+                self.first = self
+
+            def count(self):
+                return 1 if self._visible else 0
+
+            def is_visible(self):
+                return self._visible
+
+            def click(self, **_kwargs):
+                return None
+
+            def fill(self, *_args, **_kwargs):
+                return None
+
+        class FakePage:
+            def __init__(self):
+                self.url = "https://login.microsoftonline.com/example"
+
+            def goto(self, *_args, **_kwargs):
+                return None
+
+            def locator(self, selector):
+                otp_selectors = {
+                    'input[name="otc"]',
+                    'input[name="code"]',
+                    'input[inputmode="numeric"]',
+                    'input[autocomplete="one-time-code"]',
+                    'input#idTxtBx_SAOTCC_OTC',
+                }
+                return FakeLocator(selector in otp_selectors)
+
+            def wait_for_timeout(self, *_args, **_kwargs):
+                return None
+
+        class FakeContext:
+            def new_page(self):
+                return FakePage()
+
+        class FakeBrowser:
+            def new_context(self):
+                return FakeContext()
+
+            def close(self):
+                return None
+
+        class FakePlaywright:
+            def __init__(self):
+                self.chromium = types.SimpleNamespace(launch=lambda **_kwargs: FakeBrowser())
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+        old_sync = get_session.sync_playwright
+        try:
+            get_session.sync_playwright = lambda: FakePlaywright()
+            result = get_session.probe_login_flow(max_seconds=1)
+        finally:
+            get_session.sync_playwright = old_sync
+
+        self.assertEqual(result["status"], "needs_code")
+        self.assertIn("OTP", result["detail"])
+
 
 class WebhookParsingTests(unittest.TestCase):
     def test_extract_message_text_handles_multiple_payload_shapes(self):
@@ -454,10 +704,12 @@ class WebhookParsingTests(unittest.TestCase):
             webhook_receiver.DB_PATH = str(db_path)
             try:
                 webhook_receiver.init_db()
-                first = webhook_receiver.save_message("DATABASE BO1", "Aina", "deadline 14 Jun 2026", 1717500000, "{}")
-                second = webhook_receiver.save_message("DATABASE BO1", "Aina", "deadline 14 Jun 2026", 1717500000, "{}")
+                first, first_id = webhook_receiver.save_message("DATABASE BO1", "Aina", "deadline 14 Jun 2026", 1717500000, "{}")
+                second, second_id = webhook_receiver.save_message("DATABASE BO1", "Aina", "deadline 14 Jun 2026", 1717500000, "{}")
                 self.assertTrue(first)
+                self.assertEqual(first_id, 1)
                 self.assertFalse(second)
+                self.assertEqual(second_id, 1)
             finally:
                 webhook_receiver.DB_PATH = old_path
 
