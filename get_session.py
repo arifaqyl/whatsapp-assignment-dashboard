@@ -1,17 +1,21 @@
 from __future__ import annotations
 
 import os
+import re
 import time
 from datetime import datetime, timezone
 
 import config as app_config
 import db as ops_db
+import requests
 from paths import SESSION_FILE
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError, sync_playwright
 
 VLE_BASE_URL = getattr(app_config, "VLE_BASE_URL", "https://vle.example.edu.my").rstrip("/")
 VLE_EMAIL = getattr(app_config, "VLE_EMAIL", "")
 VLE_PASSWORD = getattr(app_config, "VLE_PASSWORD", "")
+BOT_TOKEN = getattr(app_config, "BOT_TOKEN", "")
+CHAT_ID = getattr(app_config, "CHAT_ID", "")
 
 
 def _set_login_state(login_state, status, message, *, health_status=None):
@@ -56,6 +60,29 @@ def _fill_if_visible(page, selectors, value):
         return True
     except Exception:
         return False
+
+
+def _extract_number_match_value(text):
+    if not text:
+        return None
+    patterns = [
+        r"enter the number shown[:\s]+(\d{2,3})",
+        r"number shown to sign in[:\s]+(\d{2,3})",
+        r"approve sign in request[:\s]+(\d{2,3})",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if match:
+            return match.group(1)
+
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    for index, line in enumerate(lines):
+        if re.search(r"enter the number shown|number shown to sign in|approve sign in request", line, flags=re.IGNORECASE):
+            for follow in lines[index:index + 4]:
+                match = re.search(r"\b(\d{2,3})\b", follow)
+                if match:
+                    return match.group(1)
+    return None
 
 
 def _has_visible_text(page, patterns):
@@ -103,6 +130,56 @@ def _is_otp_prompt(page):
     ):
         return True
     return False
+
+
+def _read_page_text(page):
+    try:
+        body = page.locator("body")
+        if body.count():
+            return body.inner_text(timeout=1000)
+    except Exception:
+        pass
+    return ""
+
+
+def _send_prompt_snapshot(login_state, page, prompt_kind):
+    if not BOT_TOKEN or not CHAT_ID:
+        return
+
+    page_text = _read_page_text(page)
+    number = _extract_number_match_value(page_text) if prompt_kind == "number_match" else None
+    prompt_key = f"{prompt_kind}:{number or ''}"
+    if login_state.get("last_prompt_key") == prompt_key:
+        return
+
+    if prompt_kind == "number_match":
+        caption = "📲 <b>Microsoft number match needed.</b>\n"
+        if number:
+            caption += f"Enter <code>{number}</code> in Microsoft Authenticator, then approve.\n"
+        else:
+            caption += "Enter the number shown on the sign-in page in Microsoft Authenticator, then approve.\n"
+        caption += "Do <b>not</b> use <code>/code</code> for this step."
+    else:
+        caption = (
+            "🔑 <b>Microsoft OTP page detected.</b>\n"
+            "Open Microsoft Authenticator, get the verification code, then send <code>/code 123456</code>."
+        )
+
+    try:
+        image = page.screenshot(type="png")
+        requests.post(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto",
+            data={
+                "chat_id": CHAT_ID,
+                "caption": caption,
+                "parse_mode": "HTML",
+            },
+            files={"photo": ("mfa.png", image, "image/png")},
+            timeout=15,
+        )
+        login_state["last_prompt_key"] = prompt_key
+    except Exception:
+        pass
 
 
 def _await_mfa_code(login_state, timeout_seconds=180):
@@ -169,6 +246,7 @@ def _handle_microsoft_flow(page, login_state):
         # Number match / approval prompt must win before generic numeric-input checks.
         if _is_number_match_prompt(page):
             _set_login_state(login_state, "waiting_approval", "Approve the sign-in on your phone. If Microsoft shows a number, enter that number in Authenticator.")
+            _send_prompt_snapshot(login_state, page, "number_match")
             _click_if_visible(page, ['#idSIButton9', 'text=/yes/i', 'text=/continue/i'])
             page.wait_for_timeout(1500)
             continue
@@ -189,6 +267,7 @@ def _handle_microsoft_flow(page, login_state):
             if not otp_box:
                 page.wait_for_timeout(1000)
                 continue
+            _send_prompt_snapshot(login_state, page, "otp")
             code = _await_mfa_code(login_state)
             otp_box.fill(code, timeout=3000)
             _click_if_visible(page, ['input[type="submit"]', 'button[type="submit"]', '#idSubmit_SAOTCC_Continue', '#idSIButton9'])

@@ -10,6 +10,7 @@ login_state = {
     "code": None,
     "message": "",
     "error": "",
+    "last_prompt_key": None,
     "thread": None,
 }
 
@@ -19,6 +20,7 @@ def _run_login() -> None:
         login_state["status"] = "running"
         login_state["code"] = None
         login_state["error"] = ""
+        login_state["last_prompt_key"] = None
         login_state["message"] = "Starting login flow"
         ops_db.record_system_health("vle_login", "running", "running: Starting login flow")
         login_and_save(login_state)
@@ -41,6 +43,7 @@ def start_login_thread() -> bool:
     login_state["status"] = "starting"
     login_state["message"] = "Login thread starting"
     login_state["error"] = ""
+    login_state["last_prompt_key"] = None
     ops_db.record_system_health("vle_login", "starting", "starting: Login thread starting")
     worker.start()
     return True

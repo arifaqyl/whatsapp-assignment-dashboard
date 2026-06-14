@@ -547,6 +547,11 @@ class VleScraperHeuristicsTests(unittest.TestCase):
 
 
 class GetSessionProbeTests(unittest.TestCase):
+    def test_extract_number_match_value(self):
+        get_session = _load_get_session()
+        text = "Approve sign in request\nEnter the number shown to sign in.\n42"
+        self.assertEqual(get_session._extract_number_match_value(text), "42")
+
     def test_probe_saved_session_reports_missing_file(self):
         get_session = _load_get_session()
         old_exists = get_session.os.path.exists
