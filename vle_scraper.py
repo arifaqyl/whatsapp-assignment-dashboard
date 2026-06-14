@@ -645,11 +645,19 @@ def scrape_assignment_page(page, url):
         for sel in [
             '.submissionstatusbutton',
             '[data-region="assign-due-date"]',
+            '.activity-dates',
+            '.activity-information',
         ]:
             els = page.query_selector_all(sel)
             for el in els:
                 txt = el.inner_text().strip()
                 if DATE_RE.search(txt):
+                    for line in txt.splitlines():
+                        line_clean = line.strip()
+                        if not line_clean:
+                            continue
+                        if line_clean.lower().startswith('due:') and DATE_RE.search(line_clean):
+                            return line_clean[:80]
                     return txt[:80]
 
         # Try table rows looking for "due date"
@@ -668,6 +676,8 @@ def scrape_assignment_page(page, url):
             if not line_clean:
                 continue
             line_lower = line_clean.lower()
+            if line_lower.startswith('due:') and DATE_RE.search(line_clean):
+                return line_clean[:80]
             if 'due' in line_lower:
                 # Look for date pattern in the same line (e.g. "Due: Sunday, 14 June 2026, 11:59 PM")
                 if DATE_RE.search(line_clean):
