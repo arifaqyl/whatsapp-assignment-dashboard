@@ -499,6 +499,7 @@ def handle(update):
         if probe.get("age_minutes") is not None:
             probe_line += f" | age {probe['age_minutes']} min"
         lines.append(probe_line)
+        session_valid = probe.get("status") == "valid"
         if probe.get("detail"):
             lines.append(f"Session detail: {probe['detail']}")
         if probe.get("final_url"):
@@ -514,14 +515,25 @@ def handle(update):
             lines.append(f"Prompt delivery: <b>{prompt_delivery}</b>")
         if prompt_detail:
             lines.append(f"Prompt detail: {prompt_detail}")
-        if preview.get("status") == "needs_approval":
-            lines.append("Action: approve the Microsoft sign-in on your phone. If it shows a number, enter that number in Authenticator. No <code>/code</code> needed yet.")
-        elif preview.get("status") == "needs_code":
-            lines.append("Action: enter the OTP you receive using <code>/code 123456</code>.")
-        elif preview.get("status") in {"needs_email", "needs_password"}:
-            lines.append("Action: bot is still before MFA. Wait a bit, then check <code>/vle_status</code> again.")
-        elif preview.get("status") == "vle_ready":
-            lines.append("Action: login flow can already reach VLE.")
+        if session_valid:
+            lines.append("Current session: <b>usable</b>. No login action needed right now.")
+            if preview.get("status") == "needs_approval":
+                lines.append("Fresh-login preview: a brand new sign-in would ask for phone approval / number match.")
+            elif preview.get("status") == "needs_code":
+                lines.append("Fresh-login preview: a brand new sign-in would ask for an OTP code.")
+            elif preview.get("status") in {"needs_email", "needs_password"}:
+                lines.append("Fresh-login preview: a brand new sign-in is still before MFA.")
+            elif preview.get("status") == "vle_ready":
+                lines.append("Fresh-login preview: the auth flow can already reach VLE.")
+        else:
+            if preview.get("status") == "needs_approval":
+                lines.append("Action: approve the Microsoft sign-in on your phone. If it shows a number, enter that number in Authenticator. No <code>/code</code> needed yet.")
+            elif preview.get("status") == "needs_code":
+                lines.append("Action: enter the OTP you receive using <code>/code 123456</code>.")
+            elif preview.get("status") in {"needs_email", "needs_password"}:
+                lines.append("Action: bot is still before MFA. Wait a bit, then check <code>/vle_status</code> again.")
+            elif preview.get("status") == "vle_ready":
+                lines.append("Action: login flow can already reach VLE.")
         if error:
             lines.append(f"Error: <code>{error[:500]}</code>")
         send("\n".join(lines))

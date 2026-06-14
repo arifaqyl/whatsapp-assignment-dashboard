@@ -830,6 +830,42 @@ class BotMfaPromptTests(unittest.TestCase):
         self.assertIn("enter that number in Authenticator", sent[0])
         self.assertIn("No <code>/code</code> needed yet", sent[0])
 
+    def test_vle_status_prefers_valid_session_over_preview(self):
+        bot = _load_bot()
+        sent = []
+        old_send = bot.send
+        old_probe_saved = bot.probe_saved_session
+        old_probe_flow = bot.probe_login_flow
+        try:
+            bot.send = sent.append
+            bot.probe_saved_session = lambda: {
+                "status": "valid",
+                "age_minutes": 1,
+                "detail": "saved session reaches /my/",
+                "final_url": "https://vle.unikl.edu.my/my/",
+            }
+            bot.probe_login_flow = lambda max_seconds=8: {
+                "status": "needs_approval",
+                "detail": "Microsoft auth page is active; likely waiting for approval or next factor",
+                "final_url": "https://login.microsoftonline.com/example",
+            }
+            bot.handle(
+                {
+                    "message": {
+                        "text": "/vle_status",
+                        "chat": {"id": "716509225"},
+                    }
+                }
+            )
+        finally:
+            bot.send = old_send
+            bot.probe_saved_session = old_probe_saved
+            bot.probe_login_flow = old_probe_flow
+
+        self.assertEqual(len(sent), 1)
+        self.assertIn("Current session: <b>usable</b>. No login action needed right now.", sent[0])
+        self.assertIn("Fresh-login preview: a brand new sign-in would ask for phone approval / number match.", sent[0])
+
 
 class WebhookParsingTests(unittest.TestCase):
     def test_extract_message_text_handles_multiple_payload_shapes(self):
