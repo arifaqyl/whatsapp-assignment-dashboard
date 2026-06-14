@@ -508,6 +508,12 @@ def handle(update):
             lines.append(f"Preview detail: {preview['detail']}")
         if preview.get("final_url"):
             lines.append(f"Preview URL: <code>{preview['final_url'][:500]}</code>")
+        prompt_delivery = login_state.get("last_prompt_delivery", "")
+        prompt_detail = login_state.get("last_prompt_detail", "")
+        if prompt_delivery:
+            lines.append(f"Prompt delivery: <b>{prompt_delivery}</b>")
+        if prompt_detail:
+            lines.append(f"Prompt detail: {prompt_detail}")
         if preview.get("status") == "needs_approval":
             lines.append("Action: approve the Microsoft sign-in on your phone. If it shows a number, enter that number in Authenticator. No <code>/code</code> needed yet.")
         elif preview.get("status") == "needs_code":

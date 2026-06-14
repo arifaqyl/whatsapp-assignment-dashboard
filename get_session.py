@@ -29,6 +29,11 @@ def _set_login_state(login_state, status, message, *, health_status=None):
         pass
 
 
+def _record_prompt_delivery(login_state, status, detail):
+    login_state["last_prompt_delivery"] = status
+    login_state["last_prompt_detail"] = detail
+
+
 def _first_visible(page, selectors):
     for selector in selectors:
         try:
@@ -144,12 +149,14 @@ def _read_page_text(page):
 
 def _send_prompt_snapshot(login_state, page, prompt_kind):
     if not BOT_TOKEN or not CHAT_ID:
+        _record_prompt_delivery(login_state, "skipped", "BOT_TOKEN or CHAT_ID missing")
         return
 
     page_text = _read_page_text(page)
     number = _extract_number_match_value(page_text) if prompt_kind == "number_match" else None
     prompt_key = f"{prompt_kind}:{number or ''}"
     if login_state.get("last_prompt_key") == prompt_key:
+        _record_prompt_delivery(login_state, "deduped", prompt_key)
         return
 
     if prompt_kind == "number_match":
@@ -167,7 +174,7 @@ def _send_prompt_snapshot(login_state, page, prompt_kind):
 
     try:
         image = page.screenshot(type="png")
-        requests.post(
+        response = requests.post(
             f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto",
             data={
                 "chat_id": CHAT_ID,
@@ -177,9 +184,26 @@ def _send_prompt_snapshot(login_state, page, prompt_kind):
             files={"photo": ("mfa.png", image, "image/png")},
             timeout=15,
         )
+        if not response.ok:
+            fallback = requests.post(
+                f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+                json={
+                    "chat_id": CHAT_ID,
+                    "text": caption.replace("<b>", "").replace("</b>", "").replace("<code>", "").replace("</code>", ""),
+                    "disable_web_page_preview": True,
+                },
+                timeout=15,
+            )
+            if fallback.ok:
+                _record_prompt_delivery(login_state, "text_fallback", f"sendPhoto failed: {response.status_code}")
+            else:
+                _record_prompt_delivery(login_state, "failed", f"sendPhoto={response.status_code}, sendMessage={fallback.status_code}")
+                return
+        else:
+            _record_prompt_delivery(login_state, "photo_sent", prompt_key)
         login_state["last_prompt_key"] = prompt_key
-    except Exception:
-        pass
+    except Exception as exc:
+        _record_prompt_delivery(login_state, "failed", str(exc))
 
 
 def _await_mfa_code(login_state, timeout_seconds=180):
@@ -291,6 +315,7 @@ def login_and_save(login_state=None):
     login_state = login_state or {}
     if not VLE_EMAIL or not VLE_PASSWORD:
         raise RuntimeError("VLE_EMAIL or VLE_PASSWORD is missing in config.py")
+    _record_prompt_delivery(login_state, "idle", "")
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
