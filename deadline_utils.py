@@ -1,7 +1,17 @@
 import re
 from datetime import date, datetime
 
-GENERIC_DUE_MARKERS = ("VLE", "CLP", "SEE", "TBD", "N/A", "WEEK")
+GENERIC_DUE_MARKERS = (
+    "VLE",
+    "CLP",
+    "SEE",
+    "TBD",
+    "N/A",
+    "WEEK",
+    "TIME REMAINING",
+    "OVERDUE",
+    "SUBMITTED",
+)
 
 SOURCE_RANK = {
     "manual": 5,
@@ -190,6 +200,8 @@ def should_replace_due(existing_due, new_due, existing_source=None, new_source=N
     if not existing_due:
         return True
     if new_source == "whatsapp-reschedule" and existing_source in {"whatsapp", "whatsapp-reschedule", "manual"}:
+        return True
+    if not has_concrete_due(existing_due) and has_concrete_due(new_due):
         return True
     if is_generic_due(existing_due) and not is_generic_due(new_due):
         return True
