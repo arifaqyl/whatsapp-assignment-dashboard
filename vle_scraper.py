@@ -5,6 +5,7 @@ resources and PDFs. Merges with WhatsApp messages. Saves to deadlines.db.
 import os
 import re
 import html
+import sys
 import sqlite3
 import requests
 from datetime import datetime
@@ -24,6 +25,12 @@ from deadline_utils import (
     should_replace_due,
     tasks_match,
 )
+
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 SESSION_FILE = str(SESSION_FILE_PATH)
 DEADLINES_DB = str(DEADLINES_DB_PATH)
 MESSAGES_DB = str(MESSAGES_DB_PATH)
@@ -993,6 +1000,8 @@ def run():
             text = (link.inner_text() + " " + href)
             code = extract_course_code(text)
             if COURSES and code and code not in COURSES:
+                continue
+            if not COURSES and not code:
                 continue
             key = code or derive_course_key(text, href)
             if key and key not in course_map:

@@ -157,6 +157,15 @@ OPS_CONSOLE_HOST=127.0.0.1
 OPS_CONSOLE_PORT=8091
 ```
 
+Useful helper when the droplet session is newer than the local one:
+
+```text
+STUDENT_BOT_HOST=68.183.181.237
+STUDENT_BOT_USER=root
+STUDENT_BOT_PASSWORD=...
+python sync_remote_session.py
+```
+
 Optional basic auth for any non-loopback exposure:
 
 ```text
