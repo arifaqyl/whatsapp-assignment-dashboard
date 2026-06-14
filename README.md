@@ -140,6 +140,7 @@ Current MVP:
 - `/login` now drives a real headless Microsoft/VLE refresh flow using saved email/password, exposes progress through `/vle_status`, treats `needs_approval` as a phone approval or Microsoft number-match step, and only consumes `/code 123456` when the sign-in flow lands on an OTP screen
 - `/vle_status` now also probes the saved `storageState.json` directly and reports whether it is missing, valid, expired, or hitting an unexpected landing URL
 - `/vle_status` now also runs a short passive login preview so it can tell you whether the live auth path is currently sitting at Microsoft email, password, approval, OTP, Moodle login, or `/my/`
+- Microsoft number-match prompts are now explicitly kept out of the OTP lane, so numeric approval screens no longer flip the live login state to `waiting_code` by mistake
 - VLE auth transitions now also write into the shared `system_health` lane as `vle_login`, so the ops console can surface login trouble alongside scraper/webhook/digest health
 
 PM2/server path:
