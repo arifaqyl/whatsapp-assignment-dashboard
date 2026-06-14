@@ -58,6 +58,53 @@ def _fill_if_visible(page, selectors, value):
         return False
 
 
+def _has_visible_text(page, patterns):
+    for pattern in patterns:
+        try:
+            locator = page.locator(f"text=/{pattern}/i").first
+            if locator.count() and locator.is_visible():
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _is_number_match_prompt(page):
+    return _has_visible_text(
+        page,
+        [
+            r"enter the number shown",
+            r"number shown to sign in",
+            r"approve sign in request",
+            r"open your authenticator app",
+            r"use your microsoft authenticator app",
+            r"check your authenticator app",
+        ],
+    )
+
+
+def _is_otp_prompt(page):
+    otp_box = _first_visible(page, [
+        'input[name="otc"]',
+        'input[name="code"]',
+        'input#idTxtBx_SAOTCC_OTC',
+    ])
+    if otp_box:
+        return True
+    if _has_visible_text(
+        page,
+        [
+            r"enter code",
+            r"verification code",
+            r"one.time code",
+            r"otp code",
+            r"authenticator code",
+        ],
+    ):
+        return True
+    return False
+
+
 def _await_mfa_code(login_state, timeout_seconds=180):
     _set_login_state(login_state, "waiting_code", "Waiting for /code 123456")
     deadline = time.time() + timeout_seconds
@@ -119,15 +166,29 @@ def _handle_microsoft_flow(page, login_state):
             page.wait_for_timeout(1500)
             continue
 
+        # Number match / approval prompt must win before generic numeric-input checks.
+        if _is_number_match_prompt(page):
+            _set_login_state(login_state, "waiting_approval", "Approve the sign-in on your phone. If Microsoft shows a number, enter that number in Authenticator.")
+            _click_if_visible(page, ['#idSIButton9', 'text=/yes/i', 'text=/continue/i'])
+            page.wait_for_timeout(1500)
+            continue
+
         # OTP code page
         otp_box = _first_visible(page, [
             'input[name="otc"]',
             'input[name="code"]',
-            'input[inputmode="numeric"]',
-            'input[autocomplete="one-time-code"]',
             'input#idTxtBx_SAOTCC_OTC',
         ])
-        if otp_box:
+        if otp_box or _is_otp_prompt(page):
+            if not otp_box:
+                otp_box = _first_visible(page, [
+                    'input[name="otc"]',
+                    'input[name="code"]',
+                    'input#idTxtBx_SAOTCC_OTC',
+                ])
+            if not otp_box:
+                page.wait_for_timeout(1000)
+                continue
             code = _await_mfa_code(login_state)
             otp_box.fill(code, timeout=3000)
             _click_if_visible(page, ['input[type="submit"]', 'button[type="submit"]', '#idSubmit_SAOTCC_Continue', '#idSIButton9'])
@@ -135,9 +196,9 @@ def _handle_microsoft_flow(page, login_state):
             page.wait_for_timeout(1500)
             continue
 
-        # Approval prompt / number match waiting
+        # Approval prompt / generic Microsoft page
         if "microsoftonline.com" in url or "login.live.com" in url:
-            _set_login_state(login_state, "waiting_approval", "Approve the sign-in on your phone or send /code")
+            _set_login_state(login_state, "waiting_approval", "Approve the sign-in on your phone. If Microsoft shows a number, enter that number in Authenticator.")
             _click_if_visible(page, ['#idSIButton9', 'text=/yes/i', 'text=/continue/i'])
             page.wait_for_timeout(1500)
             continue
@@ -208,13 +269,13 @@ def probe_login_flow(max_seconds=20):
                     browser.close()
                     return result
 
-                if _first_visible(page, [
-                    'input[name="otc"]',
-                    'input[name="code"]',
-                    'input[inputmode="numeric"]',
-                    'input[autocomplete="one-time-code"]',
-                    'input#idTxtBx_SAOTCC_OTC',
-                ]):
+                if _is_number_match_prompt(page):
+                    result["status"] = "needs_approval"
+                    result["detail"] = "Microsoft approval or number-match prompt is visible"
+                    browser.close()
+                    return result
+
+                if _is_otp_prompt(page):
                     result["status"] = "needs_code"
                     result["detail"] = "OTP code entry screen is visible"
                     browser.close()

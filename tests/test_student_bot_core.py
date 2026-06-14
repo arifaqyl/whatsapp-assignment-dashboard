@@ -693,6 +693,74 @@ class GetSessionProbeTests(unittest.TestCase):
         self.assertEqual(result["status"], "needs_code")
         self.assertIn("OTP", result["detail"])
 
+    def test_probe_login_flow_prefers_number_match_over_code(self):
+        get_session = _load_get_session()
+
+        class FakeLocator:
+            def __init__(self, visible):
+                self._visible = visible
+                self.first = self
+
+            def count(self):
+                return 1 if self._visible else 0
+
+            def is_visible(self):
+                return self._visible
+
+            def click(self, **_kwargs):
+                return None
+
+            def fill(self, *_args, **_kwargs):
+                return None
+
+        class FakePage:
+            def __init__(self):
+                self.url = "https://login.microsoftonline.com/example"
+
+            def goto(self, *_args, **_kwargs):
+                return None
+
+            def locator(self, selector):
+                visible_selectors = {
+                    'input[name="code"]',
+                    "text=/enter the number shown/i",
+                }
+                return FakeLocator(selector in visible_selectors)
+
+            def wait_for_timeout(self, *_args, **_kwargs):
+                return None
+
+        class FakeContext:
+            def new_page(self):
+                return FakePage()
+
+        class FakeBrowser:
+            def new_context(self):
+                return FakeContext()
+
+            def close(self):
+                return None
+
+        class FakePlaywright:
+            def __init__(self):
+                self.chromium = types.SimpleNamespace(launch=lambda **_kwargs: FakeBrowser())
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+        old_sync = get_session.sync_playwright
+        try:
+            get_session.sync_playwright = lambda: FakePlaywright()
+            result = get_session.probe_login_flow(max_seconds=1)
+        finally:
+            get_session.sync_playwright = old_sync
+
+        self.assertEqual(result["status"], "needs_approval")
+        self.assertIn("number-match", result["detail"])
+
 
 class BotMfaPromptTests(unittest.TestCase):
     def test_login_message_explains_number_match_without_code(self):
