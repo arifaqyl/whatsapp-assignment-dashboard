@@ -141,6 +141,7 @@ Current MVP:
 - `/vle_status` now also probes the saved `storageState.json` directly and reports whether it is missing, valid, expired, or hitting an unexpected landing URL
 - `/vle_status` now also runs a short passive login preview so it can tell you whether the live auth path is currently sitting at Microsoft email, password, approval, OTP, Moodle login, or `/my/`
 - Microsoft number-match prompts are now explicitly kept out of the OTP lane, so numeric approval screens no longer flip the live login state to `waiting_code` by mistake
+- When Microsoft MFA is active, the login worker now sends a Telegram screenshot of the live number-match or OTP page and includes a direct hint in the caption so the approval/code step is visible again from chat
 - VLE auth transitions now also write into the shared `system_health` lane as `vle_login`, so the ops console can surface login trouble alongside scraper/webhook/digest health
 
 PM2/server path:
