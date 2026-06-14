@@ -467,7 +467,7 @@ def handle(update):
             send(
                 "🌐 <b>VLE login started.</b>\n"
                 "I will try email/password first.\n"
-                "If <code>/vle_status</code> shows <b>needs_approval</b>, just approve it on your phone.\n"
+                "If <code>/vle_status</code> shows <b>needs_approval</b>, approve it on your phone. If Microsoft shows a number, enter that number in Authenticator and approve there.\n"
                 "Only use <code>/code 123456</code> if <code>/vle_status</code> shows <b>needs_code</b>.\n"
                 "Use <code>/vle_status</code> to check progress."
             )
@@ -509,7 +509,7 @@ def handle(update):
         if preview.get("final_url"):
             lines.append(f"Preview URL: <code>{preview['final_url'][:500]}</code>")
         if preview.get("status") == "needs_approval":
-            lines.append("Action: approve the Microsoft sign-in on your phone. No <code>/code</code> needed yet.")
+            lines.append("Action: approve the Microsoft sign-in on your phone. If it shows a number, enter that number in Authenticator. No <code>/code</code> needed yet.")
         elif preview.get("status") == "needs_code":
             lines.append("Action: enter the OTP you receive using <code>/code 123456</code>.")
         elif preview.get("status") in {"needs_email", "needs_password"}:

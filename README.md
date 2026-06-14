@@ -137,7 +137,7 @@ Current MVP:
 - VLE page-text extraction now uses broader task-plus-date heuristics so final-project style blocks can be captured without relying on narrow hardcoded patterns
 - VLE date parsing now also understands dotted numeric and weekday-led date shapes such as `9.6.2026` and `Monday, June 8, 2026`
 - course scrapes now purge old manual `check VLE` placeholders once concrete dated rows for that course are recovered
-- `/login` now drives a real headless Microsoft/VLE refresh flow using saved email/password, exposes progress through `/vle_status`, and can consume `/code 123456` when the sign-in flow lands on an OTP screen
+- `/login` now drives a real headless Microsoft/VLE refresh flow using saved email/password, exposes progress through `/vle_status`, treats `needs_approval` as a phone approval or Microsoft number-match step, and only consumes `/code 123456` when the sign-in flow lands on an OTP screen
 - `/vle_status` now also probes the saved `storageState.json` directly and reports whether it is missing, valid, expired, or hitting an unexpected landing URL
 - `/vle_status` now also runs a short passive login preview so it can tell you whether the live auth path is currently sitting at Microsoft email, password, approval, OTP, Moodle login, or `/my/`
 - VLE auth transitions now also write into the shared `system_health` lane as `vle_login`, so the ops console can surface login trouble alongside scraper/webhook/digest health
