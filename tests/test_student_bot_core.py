@@ -86,6 +86,46 @@ def _load_get_session():
     return importlib.import_module("get_session")
 
 
+def _load_bot():
+    config_mod = types.ModuleType("config")
+    config_mod.BOT_TOKEN = "token"
+    config_mod.CHAT_ID = "716509225"
+    config_mod.WAHA_URL = "http://localhost:2785"
+    config_mod.WAHA_SESSION = "default"
+    config_mod.WAHA_API_KEY = ""
+    config_mod.WAHA_PAIR_NUMBER = ""
+    sys.modules["config"] = config_mod
+
+    requests_mod = types.ModuleType("requests")
+    requests_mod.post = lambda *args, **kwargs: None
+    sys.modules["requests"] = requests_mod
+
+    vle_login_mod = types.ModuleType("vle_login")
+    vle_login_mod.login_state = {
+        "status": "idle",
+        "message": "",
+        "error": "",
+        "code": None,
+        "thread": None,
+    }
+    vle_login_mod.start_login_thread = lambda: True
+    sys.modules["vle_login"] = vle_login_mod
+
+    get_session_mod = types.ModuleType("get_session")
+    get_session_mod.probe_saved_session = lambda: {"status": "expired"}
+    get_session_mod.probe_login_flow = lambda max_seconds=8: {"status": "needs_approval"}
+    sys.modules["get_session"] = get_session_mod
+
+    waha_status_mod = types.ModuleType("waha_status")
+    waha_status_mod.build_whatsapp_warning = lambda *args, **kwargs: ""
+    waha_status_mod.get_session_status = lambda *args, **kwargs: {}
+    sys.modules["waha_status"] = waha_status_mod
+
+    if "bot" in sys.modules:
+        return importlib.reload(sys.modules["bot"])
+    return importlib.import_module("bot")
+
+
 class DeadlineUtilsTests(unittest.TestCase):
     def test_parse_due_date_variants(self):
         self.assertEqual(parse_due_date("05 Jun 2026"), date(2026, 6, 5))
@@ -652,6 +692,70 @@ class GetSessionProbeTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "needs_code")
         self.assertIn("OTP", result["detail"])
+
+
+class BotMfaPromptTests(unittest.TestCase):
+    def test_login_message_explains_number_match_without_code(self):
+        bot = _load_bot()
+        sent = []
+        old_send = bot.send
+        old_start = bot.start_login_thread
+        try:
+            bot.send = sent.append
+            bot.start_login_thread = lambda: True
+            bot.handle(
+                {
+                    "message": {
+                        "text": "/login",
+                        "chat": {"id": "716509225"},
+                    }
+                }
+            )
+        finally:
+            bot.send = old_send
+            bot.start_login_thread = old_start
+
+        self.assertEqual(len(sent), 1)
+        self.assertIn("needs_approval", sent[0])
+        self.assertIn("If Microsoft shows a number", sent[0])
+        self.assertIn("Only use <code>/code 123456</code>", sent[0])
+
+    def test_vle_status_approval_message_says_no_code_needed_yet(self):
+        bot = _load_bot()
+        sent = []
+        old_send = bot.send
+        old_probe_saved = bot.probe_saved_session
+        old_probe_flow = bot.probe_login_flow
+        try:
+            bot.send = sent.append
+            bot.probe_saved_session = lambda: {
+                "status": "expired",
+                "age_minutes": 12,
+                "detail": "redirects to login",
+                "final_url": "https://vle.unikl.edu.my/login/index.php?loginredirect=1",
+            }
+            bot.probe_login_flow = lambda max_seconds=8: {
+                "status": "needs_approval",
+                "detail": "Microsoft approval required",
+                "final_url": "https://login.microsoftonline.com/example",
+            }
+            bot.handle(
+                {
+                    "message": {
+                        "text": "/vle_status",
+                        "chat": {"id": "716509225"},
+                    }
+                }
+            )
+        finally:
+            bot.send = old_send
+            bot.probe_saved_session = old_probe_saved
+            bot.probe_login_flow = old_probe_flow
+
+        self.assertEqual(len(sent), 1)
+        self.assertIn("needs_approval", sent[0])
+        self.assertIn("enter that number in Authenticator", sent[0])
+        self.assertIn("No <code>/code</code> needed yet", sent[0])
 
 
 class WebhookParsingTests(unittest.TestCase):
