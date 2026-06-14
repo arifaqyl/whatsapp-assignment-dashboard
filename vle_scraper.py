@@ -6,6 +6,7 @@ import os
 import re
 import html
 import sys
+import shutil
 import sqlite3
 import requests
 from datetime import datetime
@@ -28,7 +29,7 @@ from deadline_utils import (
 
 for _stream in (sys.stdout, sys.stderr):
     try:
-        _stream.reconfigure(encoding="utf-8", errors="replace")
+        _stream.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
     except Exception:
         pass
 SESSION_FILE = str(SESSION_FILE_PATH)
@@ -36,6 +37,11 @@ DEADLINES_DB = str(DEADLINES_DB_PATH)
 MESSAGES_DB = str(MESSAGES_DB_PATH)
 VLE_BASE_URL = getattr(app_config, "VLE_BASE_URL", "https://vle.example.edu.my").rstrip("/")
 COURSES = getattr(app_config, "VLE_COURSES", {})
+MAX_ASSIGN_PAGE_VISITS_PER_COURSE = int(getattr(app_config, "VLE_MAX_ASSIGN_PAGE_VISITS_PER_COURSE", 10))
+MAX_RESOURCE_READS_PER_COURSE = int(getattr(app_config, "VLE_MAX_RESOURCE_READS_PER_COURSE", 6))
+MAX_CLP_READS_PER_COURSE = int(getattr(app_config, "VLE_MAX_CLP_READS_PER_COURSE", 2))
+MAX_FALLBACK_RESOURCE_READS_PER_COURSE = int(getattr(app_config, "VLE_MAX_FALLBACK_RESOURCE_READS_PER_COURSE", 3))
+HAS_PDFTOTEXT = shutil.which("pdftotext") is not None
 
 ASSIGNMENT_KEYWORDS = re.compile(
     r'\b(?:assignment|project|quiz|quizzes|report|submission|submit|lab|task|exercise|test|exam|proposal'
@@ -92,11 +98,11 @@ def _clean_task_name(task):
 
 
 def _is_stale_date(due_str):
-    """Return True if the due date is clearly from a past semester (before 2025)."""
+    """Return True if the due date is clearly from a past semester (before 2026)."""
     m = re.search(r'\b(20\d{2})\b', due_str)
     if m:
         year = int(m.group(1))
-        if year < 2025:
+        if year < 2026:
             return True
     return False
 
@@ -224,6 +230,10 @@ def _is_low_signal_resource(text):
 
 def _skip(reason, task_name):
     print(f"    ~ skip {reason}: {task_name[:80]}")
+
+
+def _record_scraper_progress(details):
+    ops_db.record_system_health("vle_scraper", "ok", details[:400])
 
 
 def _clean_page_text_task(task_name):
@@ -369,9 +379,10 @@ def _extract_text_from_file(data, filename=''):
     text = None
     try:
         if suffix == '.pdf':
-            result = subprocess.run(['pdftotext', tmp_path, '-'], capture_output=True, timeout=15)
-            text = result.stdout.decode('utf-8', errors='ignore')
-            if not text.strip():
+            if HAS_PDFTOTEXT:
+                result = subprocess.run(['pdftotext', tmp_path, '-'], capture_output=True, timeout=15)
+                text = result.stdout.decode('utf-8', errors='ignore')
+            if not text or not text.strip():
                 try:
                     import pdfminer.high_level
                     text = pdfminer.high_level.extract_text(tmp_path)
@@ -511,6 +522,22 @@ def purge_noisy_clp_rows(conn):
     return removed
 
 
+def purge_stale_vle_rows(conn):
+    rows = conn.execute(
+        "SELECT id, task, due, source FROM deadlines WHERE status != 'Done' AND source LIKE 'vle%'"
+    ).fetchall()
+    removed = 0
+    for row_id, task, due, source in rows:
+        if not _is_stale_date(due or ""):
+            continue
+        conn.execute("DELETE FROM deadlines WHERE id = ?", (row_id,))
+        removed += 1
+        print(f"  Purged stale VLE row: {task[:60]} | {due[:40]} | {source}")
+    if removed:
+        conn.commit()
+    return removed
+
+
 def extract_clp_deadlines(page, resource_url, course_code):
     """Read a Course Learning Plan and extract assessment names.
     CLPs are noisy, so only keep dated, specific assessment lines."""
@@ -599,7 +626,7 @@ def try_sso_refresh(page, ctx):
     """Attempt SSO auto-refresh if Moodle session expired."""
     import time
     print("  Session expired — trying SSO auto-refresh...")
-    page.goto(f"{VLE_BASE_URL}/auth/oidc/", timeout=30000)
+    page.goto(f"{VLE_BASE_URL}/auth/oidc/", timeout=30000, wait_until="domcontentloaded")
     for _ in range(20):
         time.sleep(1)
         if VLE_BASE_URL.rstrip("/") + "/my" in page.url:
@@ -612,8 +639,7 @@ def try_sso_refresh(page, ctx):
 def scrape_assignment_page(page, url):
     """Visit an individual assignment/activity page and extract due date."""
     try:
-        page.goto(url, timeout=20000)
-        page.wait_for_load_state("domcontentloaded", timeout=10000)
+        page.goto(url, timeout=20000, wait_until="domcontentloaded")
 
         # Look for due date in assignment view
         for sel in [
@@ -683,15 +709,20 @@ def retry_due_lookup(resource_url, task_name=""):
                 pass
 
 
-def scrape_course(page, course_url, course_code, conn):
+def scrape_course(page, course_url, course_code, conn, course_index=None, total_courses=None):
     """Visit a course page and scrape all assignments and resources."""
     added = []
     course_name = COURSES.get(course_code, course_code)
+    course_prefix = f"{course_index}/{total_courses}" if course_index and total_courses else course_code
+    assign_page_visits = 0
+    resource_reads = 0
+    clp_reads = 0
+    fallback_resource_reads = 0
     print(f"\n  [{course_name}] {course_url[:70]}")
+    _record_scraper_progress(f"course={course_name}; stage=loading; slot={course_prefix}")
 
     try:
-        page.goto(course_url, timeout=30000)
-        page.wait_for_load_state("networkidle", timeout=15000)
+        page.goto(course_url, timeout=20000, wait_until="domcontentloaded")
     except Exception as e:
         print(f"    ! Load error: {e}")
         return added
@@ -714,6 +745,7 @@ def scrape_course(page, course_url, course_code, conn):
     activities = []  # list of (task_name, href, modtype, due_inline, title, aria)
     items = page.query_selector_all('[data-activityname]')
     print(f"    Activities found: {len(items)}")
+    _record_scraper_progress(f"course={course_name}; stage=collect; slot={course_prefix}; activities={len(items)}")
 
     for item in items:
         try:
@@ -839,11 +871,14 @@ def scrape_course(page, course_url, course_code, conn):
             # For assign/quiz: visit assignment page to get due date
             if (not due) and href and is_assign_type:
                 try:
-                    result = scrape_assignment_page(page, href)
-                    if result and result != "See VLE" and DATE_RE.search(result):
-                        due = result
-                    page.goto(course_url, timeout=20000)
-                    page.wait_for_load_state("domcontentloaded", timeout=10000)
+                    if assign_page_visits >= MAX_ASSIGN_PAGE_VISITS_PER_COURSE:
+                        _skip("assign page budget reached", task_name)
+                    else:
+                        assign_page_visits += 1
+                        result = scrape_assignment_page(page, href)
+                        if result and result != "See VLE" and DATE_RE.search(result):
+                            due = result
+                        page.goto(course_url, timeout=20000, wait_until="domcontentloaded")
                 except Exception as e:
                     print(f"    ! assign page error: {e}")
 
@@ -852,8 +887,11 @@ def scrape_course(page, course_url, course_code, conn):
                 try:
                     # First try filename/link hints before downloading content.
                     pdf_due = _resource_hints(task_name, href, title, aria)
-                    if not pdf_due:
+                    if not pdf_due and resource_reads < MAX_RESOURCE_READS_PER_COURSE:
+                        resource_reads += 1
                         pdf_due = read_pdf_deadline(page, href)
+                    elif not pdf_due:
+                        _skip("resource read budget reached", task_name)
                     if pdf_due:
                         due = pdf_due
                 except Exception as e:
@@ -867,13 +905,17 @@ def scrape_course(page, course_url, course_code, conn):
                     continue
                 if href:
                     try:
-                        clp_tasks = extract_clp_deadlines(page, href, course_code)
-                        for ct_name, ct_due in clp_tasks:
-                            if add_if_new(conn, ct_name, course_name, ct_due, 'vle-clp'):
-                                added.append((ct_name, course_code, ct_due))
-                                print(f"    + [clp] {ct_name[:50]}  due: {ct_due[:30]}")
-                            else:
-                                print(f"    ~ dup [clp]: {ct_name[:50]}")
+                        if clp_reads >= MAX_CLP_READS_PER_COURSE:
+                            _skip("clp read budget reached", task_name)
+                        else:
+                            clp_reads += 1
+                            clp_tasks = extract_clp_deadlines(page, href, course_code)
+                            for ct_name, ct_due in clp_tasks:
+                                if add_if_new(conn, ct_name, course_name, ct_due, 'vle-clp'):
+                                    added.append((ct_name, course_code, ct_due))
+                                    print(f"    + [clp] {ct_name[:50]}  due: {ct_due[:30]}")
+                                else:
+                                    print(f"    ~ dup [clp]: {ct_name[:50]}")
                     except Exception as e:
                         print(f"    ! CLP error: {e}")
                 # CLP itself is not a submittable task — always skip adding it
@@ -932,8 +974,12 @@ def scrape_course(page, course_url, course_code, conn):
                 _skip("fallback missing project/assignment keywords", task_name)
                 continue
             try:
+                if fallback_resource_reads >= MAX_FALLBACK_RESOURCE_READS_PER_COURSE:
+                    _skip("fallback read budget reached", task_name)
+                    continue
                 pdf_due = _resource_hints(task_name, href, title, aria)
                 if not pdf_due:
+                    fallback_resource_reads += 1
                     pdf_due = read_pdf_deadline(page, href)
                 if pdf_due and add_if_new(conn, task_name, course_name, pdf_due, f'vle-{course_name.lower()}'):
                     added.append((task_name, course_code, pdf_due))
@@ -944,12 +990,18 @@ def scrape_course(page, course_url, course_code, conn):
     if any(has_concrete_due(due) for _, _, due in added):
         _purge_manual_placeholder_rows(conn, course_name)
 
+    _record_scraper_progress(
+        f"course={course_name}; stage=done; slot={course_prefix}; added={len(added)};"
+        f" assign_visits={assign_page_visits}; resource_reads={resource_reads};"
+        f" clp_reads={clp_reads}; fallback_reads={fallback_resource_reads}"
+    )
     return added
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def run():
+    started_at = datetime.now()
     ts = datetime.now().strftime('%H:%M:%S')
     print(f"[{ts}] VLE Deep Scraper starting...")
     tg("🔄 <b>VLE Deep Scraper</b>\nLoading course pages...")
@@ -963,6 +1015,7 @@ def run():
 
     conn = init_db()
     purge_noisy_clp_rows(conn)
+    purge_stale_vle_rows(conn)
     all_added = []
 
     with sync_playwright() as p:
@@ -972,8 +1025,7 @@ def run():
 
         # Load dashboard
         print("Loading VLE...")
-        page.goto(f"{VLE_BASE_URL}/my/", timeout=60000)
-        page.wait_for_load_state("networkidle", timeout=20000)
+        page.goto(f"{VLE_BASE_URL}/my/", timeout=30000, wait_until="domcontentloaded")
 
         if "microsoftonline.com" in page.url:
             tg("⚠️ <b>Session Expired (Microsoft)</b>\nRun get_session.py locally.")
@@ -985,15 +1037,13 @@ def run():
                 tg("⚠️ <b>Session Expired</b>\nRun get_session.py locally.")
                 ops_db.record_system_health("vle_scraper", "error", "session expired login/index.php")
                 b.close(); conn.close(); return
-            page.goto(f"{VLE_BASE_URL}/my/", timeout=30000)
-            page.wait_for_load_state("networkidle", timeout=15000)
+            page.goto(f"{VLE_BASE_URL}/my/", timeout=20000, wait_until="domcontentloaded")
 
         # Discover course URLs from the full courses page only.
         # The dashboard contains repeated cards and timeline links that can
         # misassociate a course code with the wrong href.
         course_map = {}  # course key -> url
-        page.goto(f"{VLE_BASE_URL}/my/courses.php", timeout=20000)
-        page.wait_for_load_state("networkidle", timeout=10000)
+        page.goto(f"{VLE_BASE_URL}/my/courses.php", timeout=20000, wait_until="domcontentloaded")
         links = page.query_selector_all('a[href*="course/view.php"]')
         for link in links:
             href = link.get_attribute('href') or ''
@@ -1013,8 +1063,9 @@ def run():
             print(f"Missing: {[c for c in COURSES if c not in course_map]}")
 
         # Deep-scrape each course
-        for course_key, url in course_map.items():
-            added = scrape_course(page, url, course_key, conn)
+        total_courses = len(course_map)
+        for idx, (course_key, url) in enumerate(course_map.items(), start=1):
+            added = scrape_course(page, url, course_key, conn, course_index=idx, total_courses=total_courses)
             all_added.extend(added)
 
         b.close()
@@ -1050,10 +1101,11 @@ def run():
     lines.append("\n<i>/tasks — full task list  |  /summary — focused dashboard  |  /scrape — rescan now</i>")
 
     tg("\n".join(lines))
+    elapsed = int((datetime.now() - started_at).total_seconds())
     ops_db.record_system_health(
         "vle_scraper",
         "ok",
-        f"new_tasks={len(all_added)}; pending={len(pending)}; courses={len(course_map)}",
+        f"done; new_tasks={len(all_added)}; pending={len(pending)}; courses={len(course_map)}; elapsed_s={elapsed}",
     )
     print(f"\nDone. {len(all_added)} new, {len(pending)} total pending.")
 
